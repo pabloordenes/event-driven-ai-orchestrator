@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="Omro.Api/Omro.Api.csproj" />
+  <Project Path="Omro.Application/Omro.Application.csproj" />
+  <Project Path="Omro.Domain/Omro.Domain.csproj" />
+  <Project Path="Omro.Infrastructure/Omro.Infrastructure.csproj" />
+  <Project Path="Omro.Worker/Omro.Worker.csproj" />
+</Solution>
