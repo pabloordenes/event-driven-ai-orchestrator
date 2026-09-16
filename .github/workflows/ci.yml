@@ -1,0 +1,29 @@
+name: OMRO CI Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x' # Cambia a '10.0.x' si estás usando la preview de .NET 10
+
+      - name: Restore dependencies
+        run: dotnet restore Omro.slnx
+
+      - name: Build
+        run: dotnet build Omro.slnx --no-restore --configuration Release
+
+      - name: Test
+        run: dotnet test Omro.slnx --no-build --configuration Release --verbosity normal
