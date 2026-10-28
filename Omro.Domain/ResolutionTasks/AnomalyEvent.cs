@@ -1,6 +1,6 @@
 ﻿namespace Omro.Domain.ResolutionTasks;
 
-public readonly record struct AnomalyEvent(
+public record AnomalyEvent(
     decimal RiskProbability,
     Guid ResourceId
     );  
