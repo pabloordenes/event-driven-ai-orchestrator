@@ -21,7 +21,7 @@ public class AnomalyEventConsumer : IConsumer<AnomalyEvent>
         AnomalyEvent message = context.Message; // estructura de anomaly event
         
         _logger.LogInformation(
-            "Anomalía recibida desde MedCare AI - Cita: {ResourceId}, Riesgo: {RiskProbability",
+            "Anomalía recibida desde MedCare AI - Cita: {ResourceId}, Riesgo: {RiskProbability}",
             message.ResourceId, message.RiskProbability
             );
 
@@ -31,6 +31,6 @@ public class AnomalyEventConsumer : IConsumer<AnomalyEvent>
         
         Guid TaskId = await _sender.Send(command, context.CancellationToken);
         
-        _logger.LogInformation("ResolutionTask generada exitosamente con ID: {TaskId}");
+        _logger.LogInformation("ResolutionTask generada exitosamente con ID: {TaskId}", TaskId);
     }
 }
