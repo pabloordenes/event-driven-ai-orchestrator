@@ -10,10 +10,13 @@
     <ItemGroup>
         <PackageReference Include="MassTransit" Version="8.3.3" />
         <PackageReference Include="MassTransit.RabbitMQ" Version="8.3.3" />
+        <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.8" />
         <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.8"/>
+        <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
     </ItemGroup>
 
     <ItemGroup>
       <ProjectReference Include="..\Omro.Application\Omro.Application.csproj" />
+      <ProjectReference Include="..\Omro.Infrastructure\Omro.Infrastructure.csproj" />
     </ItemGroup>
 </Project>
