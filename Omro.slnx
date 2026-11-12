@@ -5,4 +5,5 @@
   <Project Path="Omro.Domain/Omro.Domain.csproj" />
   <Project Path="Omro.Infrastructure/Omro.Infrastructure.csproj" />
   <Project Path="Omro.Worker/Omro.Worker.csproj" />
+  <Project Path="Omro.IntegrationTests/Omro.IntegrationTests.csproj" />
 </Solution>
