@@ -23,25 +23,28 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
     {
         var services = new ServiceCollection();
 
-        // 1. Inyectamos la Base de Datos en Memoria (aislada por test)
+        // FIJAMOS EL NOMBRE DE LA BD FUERA DE LA LAMBDA
+        var sharedDbName = Guid.NewGuid().ToString();
+
+        // 1. Inyectamos la Base de Datos en Memoria (aislada por test, pero compartida entre scopes)
         services.AddDbContext<ApplicationDbContext>(options =>
-            options.UseInMemoryDatabase(Guid.NewGuid().ToString()));
+            options.UseInMemoryDatabase(sharedDbName));
 
         // Inyectamos el repositorio y el Unit of Work simulando el entorno de producción
         services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
-        
-        // 2. Inyectamos MediatR para que tu Consumer pueda usar ISender
+    
+        // 2. Inyectamos MediatR
         services.AddMediatR(cfg => 
             cfg.RegisterServicesFromAssemblyContaining<IngestAnomalyCommandHandler>());
 
-        // 3. Inyectamos el Arnés de MassTransit y le registramos tu consumidor
+        // 3. Inyectamos el Arnés de MassTransit
         services.AddMassTransitTestHarness(x =>
         {
             x.AddConsumer<AnomalyEventConsumer>();
         });
 
-        // 4. Inyectamos ILogger (Tu consumidor lo exige en su constructor)
+        // 4. Inyectamos ILogger
         services.AddLogging();
 
         // Construimos el motor
