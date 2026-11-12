@@ -15,6 +15,8 @@ public class ResolutionTask
         Anomaly = anomaly;
         Status = ResolutionStatus.Ingested;
     }
+    
+    private ResolutionTask() {} // ef core
 
     public void StartAnalysis()
     {
