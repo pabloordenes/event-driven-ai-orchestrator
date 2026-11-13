@@ -10,35 +10,29 @@ public class ResolutionTaskTests
     {
         // arrange
         var dummyEvent = new AnomalyEvent(RiskProbability:0.8m, ResourceId:Guid.NewGuid());
-        
         var task = new ResolutionTask(dummyEvent);
         
         // act
         task.StartAnalysis();
         
         // assert
-        // verificamos que el estado cambio usando FluentAssertions
         task.Status.Should().Be(ResolutionStatus.Analyzing);
-        
-        // verificamos que se haya agregado exactamente 1 registro a la lista
         task.ReasoningTraces.Should().HaveCount(1);
         
-        // verificamos keywords
-        task.ReasoningTraces[0].Should().Contain("Iniciando motor cognitivo");
+        var firstTrace = task.ReasoningTraces.First();
+        firstTrace.StepType.Should().Be("SystemState");
+        firstTrace.TraceMessage.Should().Contain("Iniciando motor cognitivo");
     }
 
     [Fact]
     public void StartAnalysis_WhenStateIsNotIngested_ShouldThrowException()
     {
-        
         // arrange
         var dummyEvent = new AnomalyEvent(RiskProbability:0.8m, ResourceId:Guid.NewGuid());
-        
         var task = new ResolutionTask(dummyEvent);
         
         // act
         task.StartAnalysis(); // pasamos el estado a analyzing para forzar la excepcion
-        
         Action act = () => task.StartAnalysis();
         
         // assert
