@@ -1,0 +1,28 @@
+﻿# Etapa 1: Construcción (SDK)
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+# Copiar solo los csproj primero para aprovechar la caché de capas de Docker
+COPY ["Omro.Api/Omro.Api.csproj", "Omro.Api/"]
+COPY ["Omro.Application/Omro.Application.csproj", "Omro.Application/"]
+COPY ["Omro.Infrastructure/Omro.Infrastructure.csproj", "Omro.Infrastructure/"]
+COPY ["Omro.Domain/Omro.Domain.csproj", "Omro.Domain/"]
+
+# Restaurar dependencias
+RUN dotnet restore "Omro.Api/Omro.Api.csproj"
+
+# Copiar el resto del código y compilar
+COPY . .
+WORKDIR "/src/Omro.Api"
+RUN dotnet publish "Omro.Api.csproj" -c Release -o /app/publish /p:UseAppHost=false
+
+# Etapa 2: Ejecución (Runtime ligero)
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
+WORKDIR /app
+COPY --from=build /app/publish .
+
+# Render inyecta dinámicamente la variable PORT.
+# En .NET 8/10, los contenedores escuchan por defecto en el puerto 8080.
+ENV ASPNETCORE_HTTP_PORTS=8080
+
+ENTRYPOINT ["dotnet", "Omro.Api.dll"]
