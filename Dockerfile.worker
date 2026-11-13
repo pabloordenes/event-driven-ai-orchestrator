@@ -1,0 +1,24 @@
+# Etapa 1: Construcción (SDK)
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+# Copiar csproj para aprovechar caché
+COPY ["Omro.Worker/Omro.Worker.csproj", "Omro.Worker/"]
+COPY ["Omro.Application/Omro.Application.csproj", "Omro.Application/"]
+COPY ["Omro.Infrastructure/Omro.Infrastructure.csproj", "Omro.Infrastructure/"]
+COPY ["Omro.Domain/Omro.Domain.csproj", "Omro.Domain/"]
+
+# Restaurar dependencias
+RUN dotnet restore "Omro.Worker/Omro.Worker.csproj"
+
+# Copiar el resto y compilar
+COPY . .
+WORKDIR "/src/Omro.Worker"
+RUN dotnet publish "Omro.Worker.csproj" -c Release -o /app/publish /p:UseAppHost=false
+
+# Etapa 2: Ejecución (Runtime)
+FROM mcr.microsoft.com/dotnet/runtime:10.0 AS final
+WORKDIR /app
+COPY --from=build /app/publish .
+
+ENTRYPOINT ["dotnet", "Omro.Worker.dll"]

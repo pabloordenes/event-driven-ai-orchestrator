@@ -8,6 +8,8 @@
   </PropertyGroup>
 
     <ItemGroup>
+        <PackageReference Include="MassTransit.RabbitMQ" Version="9.2.6" />
+        <PackageReference Include="MediatR" Version="15.0.0" />
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.8" />
         <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.8">
           <PrivateAssets>all</PrivateAssets>
