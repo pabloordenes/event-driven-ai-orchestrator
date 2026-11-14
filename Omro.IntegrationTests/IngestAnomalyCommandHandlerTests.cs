@@ -23,13 +23,15 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         var services = new ServiceCollection();
-
-        // FIJAMOS EL NOMBRE DE LA BD FUERA DE LA LAMBDA
         var sharedDbName = Guid.NewGuid().ToString();
 
-        // 1. Inyectamos la Base de Datos en Memoria (aislada por test, pero compartida entre scopes)
         services.AddDbContext<ApplicationDbContext>(options =>
             options.UseInMemoryDatabase(sharedDbName));
+
+        services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
+        services.AddScoped<IUnitOfWork, UnitOfWork>();
+        
+        services.AddScoped<Application.Interfaces.ICognitiveOrchestrator, FakeCognitiveOrchestrator>();
 
         // Inyectamos el repositorio y el Unit of Work simulando el entorno de producción
         services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
@@ -89,5 +91,24 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
 
         var tasksInDb = await dbContext.ResolutionTasks.ToListAsync();
         tasksInDb.Should().NotBeEmpty("El handler de MediatR debió persistir en PostgreSQL (InMemory).");
+    }
+    
+    public class FakeCognitiveOrchestrator : Application.Interfaces.ICognitiveOrchestrator
+    {
+        public Task<(CognitivePlan Plan, int PromptTokens, int CompletionTokens)> ProposeResolutionAsync(
+            AnomalyEvent anomaly, 
+            string tenantPromptContext, 
+            CancellationToken cancellationToken = default)
+        {
+            // Simulamos lo que Gemini habría respondido en menos de 1 milisegundo
+            var dummyPlan = new CognitivePlan(
+                Title: "Acción Simulada",
+                Reasoning: "Porque es un test automatizado",
+                ConfidenceScore: 0.99m,
+                ProposedActions: new List<ProposedAction>()
+            );
+
+            return Task.FromResult((dummyPlan, 15, 25)); // Simulamos gasto de tokens
+        }
     }
 }
