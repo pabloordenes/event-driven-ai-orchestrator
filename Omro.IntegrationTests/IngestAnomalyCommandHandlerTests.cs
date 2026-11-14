@@ -3,6 +3,7 @@ using MassTransit;
 using MassTransit.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Omro.Application.IntegrationEvents;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 
 // Importa tus dominios reales (Ajusta los namespaces según tu proyecto)
@@ -65,7 +66,8 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
     public async Task Should_Consume_AnomalyEvent_And_Save_ResolutionTask_To_Database()
     {
         // 1. ARRANGE
-        var anomalyEvent = new AnomalyEvent(
+        var anomalyEvent = new AnomalyIntegrationEvent(
+            TenantId: Guid.NewGuid(),
             RiskProbability: 0.85m,
             ResourceId: Guid.NewGuid()
         );
@@ -74,11 +76,11 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         await _harness.Bus.Publish(anomalyEvent);
 
         // 3. ASSERT
-        var isConsumedByBus = await _harness.Consumed.Any<AnomalyEvent>();
+        var isConsumedByBus = await _harness.Consumed.Any<AnomalyIntegrationEvent>();
         isConsumedByBus.Should().BeTrue("El mensaje AnomalyEvent debió ser enrutado.");
 
         var consumerHarness = _harness.GetConsumerHarness<AnomalyEventConsumer>();
-        var isConsumedByHandler = await consumerHarness.Consumed.Any<AnomalyEvent>();
+        var isConsumedByHandler = await consumerHarness.Consumed.Any<AnomalyIntegrationEvent>();
         isConsumedByHandler.Should().BeTrue("El AnomalyEventConsumer debió procesar el mensaje sin excepciones.");
 
         // Aserción de Persistencia

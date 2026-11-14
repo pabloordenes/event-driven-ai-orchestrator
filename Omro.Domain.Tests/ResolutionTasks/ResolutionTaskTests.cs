@@ -10,7 +10,7 @@ public class ResolutionTaskTests
     {
         // arrange
         var dummyEvent = new AnomalyEvent(RiskProbability:0.8m, ResourceId:Guid.NewGuid());
-        var task = new ResolutionTask(dummyEvent);
+        var task = new ResolutionTask(Guid.NewGuid(), dummyEvent);
         
         // act
         task.StartAnalysis();
@@ -29,7 +29,7 @@ public class ResolutionTaskTests
     {
         // arrange
         var dummyEvent = new AnomalyEvent(RiskProbability:0.8m, ResourceId:Guid.NewGuid());
-        var task = new ResolutionTask(dummyEvent);
+        var task = new ResolutionTask(Guid.NewGuid(), dummyEvent);
         
         // act
         task.StartAnalysis(); // pasamos el estado a analyzing para forzar la excepcion

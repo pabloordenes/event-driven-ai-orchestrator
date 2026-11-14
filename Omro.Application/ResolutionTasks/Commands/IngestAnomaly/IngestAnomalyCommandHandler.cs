@@ -23,7 +23,7 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
             RiskProbability: request.RiskProbability,
             ResourceId: request.ResourceId);
         
-        var resolutionTask = new ResolutionTask(anomalyEvent);
+        var resolutionTask = new ResolutionTask(request.TenantId, anomalyEvent);
 
         _repository.Add(resolutionTask);
         

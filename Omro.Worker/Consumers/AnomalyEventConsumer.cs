@@ -1,11 +1,12 @@
 ﻿using MassTransit;
 using MediatR;
+using Omro.Application.IntegrationEvents;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Domain.ResolutionTasks;
 
 namespace Omro.Worker.Consumers;
 
-public class AnomalyEventConsumer : IConsumer<AnomalyEvent>
+public class AnomalyEventConsumer : IConsumer<AnomalyIntegrationEvent>
 {
     private readonly ISender _sender;
     private readonly ILogger<AnomalyEventConsumer> _logger;
@@ -16,9 +17,9 @@ public class AnomalyEventConsumer : IConsumer<AnomalyEvent>
         _logger = logger;
     }
 
-    public async Task Consume(ConsumeContext<AnomalyEvent> context)
+    public async Task Consume(ConsumeContext<AnomalyIntegrationEvent> context)
     {
-        AnomalyEvent message = context.Message; // estructura de anomaly event
+        var message = context.Message; // estructura de anomaly event
         
         _logger.LogInformation(
             "Anomalía recibida desde MedCare AI - Cita: {ResourceId}, Riesgo: {RiskProbability}",
@@ -26,11 +27,12 @@ public class AnomalyEventConsumer : IConsumer<AnomalyEvent>
             );
 
         var command = new IngestAnomalyCommand(
+            TenantId: message.TenantId,
             RiskProbability: message.RiskProbability,
             ResourceId: message.ResourceId);
         
-        Guid TaskId = await _sender.Send(command, context.CancellationToken);
+        Guid taskId = await _sender.Send(command, context.CancellationToken);
         
-        _logger.LogInformation("ResolutionTask generada exitosamente con ID: {TaskId}", TaskId);
+        _logger.LogInformation("ResolutionTask generada exitosamente con ID: {taskId}", taskId);
     }
 }
