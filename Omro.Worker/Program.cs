@@ -1,8 +1,10 @@
 using MassTransit;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Omro.Application.Interfaces;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Domain.Repositories;
+using Omro.Infrastructure.CognitiveServices.Agents;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
 using Omro.Worker;
@@ -25,6 +27,7 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
 // 3. Inyección de Repositorios y Unit of Work (Clean Architecture)
 builder.Services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
+builder.Services.AddScoped<ICognitiveOrchestrator, GeminiCognitiveOrchestrator>();
 
 // 4. Configuración de MassTransit (RabbitMQ / CloudAMQP)
 builder.Services.AddMassTransit(x =>
