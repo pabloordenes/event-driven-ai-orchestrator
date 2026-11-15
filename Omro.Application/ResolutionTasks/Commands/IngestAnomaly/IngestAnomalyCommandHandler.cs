@@ -33,15 +33,32 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         // mutación de dominio
         resolutionTask.StartAnalysis();
 
-        // reglas de negocio (a futuro buscar en db por tenantId)
-        string tenantRules =
-            "Priorizar acciones conservadoras. Si la probabilidad de riesgo supera el 0.8, propón un WEBHOOK de alerta inmediata.";
+        // Simulamos las reglas de negocio extraídas desde la base de datos para este Tenant (Clínica)
+        string tenantPromptContext = """
+                                     Eres el sistema de decisiones de MedCareOS para la 'Clínica San José'.
+                                     Tu objetivo es mitigar el impacto financiero de los pacientes que no asisten a sus citas (No-Shows).
 
+                                     REGLAS DE NEGOCIO PARA SOBRECUPOS (OVERBOOKING):
+                                     1. Si la probabilidad de riesgo de inasistencia (RiskProbability) es MAYOR o IGUAL a 0.85:
+                                        - Debes autorizar un sobrecupo automático para no perder la hora del médico.
+                                        - ActionType: "GENERATE_OVERBOOK"
+                                        - Endpoint: "https://api.medcareos.com/v1/appointments/overbook"
+                                        - Payload: Debe incluir "resourceId", "targetRisk": <el valor del riesgo>, y "autoApprove": true.
+
+                                     2. Si la probabilidad de riesgo es MENOR a 0.85:
+                                        - No es seguro hacer sobrecupo. Solo mantendremos la cita en observación.
+                                        - ActionType: "MONITOR_APPOINTMENT"
+                                        - Endpoint: "https://api.medcareos.com/v1/appointments/monitor"
+                                        - Payload: Debe incluir "resourceId" y "requiresAction": false.
+                                     """;
+        
         // razonamiento cognitivo: el modelo asume el control
         var (plan, promptTokens, completionTokens) = await _orchestrator.ProposeResolutionAsync(
             anomalyEvent,
-            tenantRules,
+            tenantPromptContext,
             cancellationToken);
+        
+        Console.WriteLine($"\n[MEDCAREOS DECISIÓN CLÍNICA]\n{System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true })}\n");
         
         // mutacion de dominio final: empaquetamos el JSON y los costos
         resolutionTask.ProposePlan(plan, promptTokens, completionTokens);
