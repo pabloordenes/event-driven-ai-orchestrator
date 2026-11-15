@@ -10,15 +10,18 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
     private readonly IResolutionTaskRepository _repository;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICognitiveOrchestrator _orchestrator;
+    private readonly IWebhookDispatcher _webhookDispatcher;
 
     public IngestAnomalyCommandHandler(
         IResolutionTaskRepository repository, 
         IUnitOfWork unitOfWork,
-        ICognitiveOrchestrator orchestrator)
+        ICognitiveOrchestrator orchestrator,
+        IWebhookDispatcher webhookDispatcher)
     {
         _repository = repository;
         _unitOfWork = unitOfWork;
         _orchestrator = orchestrator;
+        _webhookDispatcher = webhookDispatcher;
     }
     
     public async Task<Guid> Handle(IngestAnomalyCommand request, CancellationToken cancellationToken)
@@ -40,16 +43,16 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
 
                                      REGLAS DE NEGOCIO PARA SOBRECUPOS (OVERBOOKING):
                                      1. Si la probabilidad de riesgo de inasistencia (RiskProbability) es MAYOR o IGUAL a 0.85:
-                                        - Debes autorizar un sobrecupo automático para no perder la hora del médico.
-                                        - ActionType: "GENERATE_OVERBOOK"
-                                        - Endpoint: "https://api.medcareos.com/v1/appointments/overbook"
-                                        - Payload: Debe incluir "resourceId", "targetRisk": <el valor del riesgo>, y "autoApprove": true.
+                                     - Debes autorizar un sobrecupo automático para no perder la hora del médico.
+                                     - ActionType: "GENERATE_OVERBOOK"
+                                     - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/appointments/overbook"
+                                     - Payload: Debe incluir "resourceId", "targetRisk": <el valor del riesgo>, y "autoApprove": true.
 
                                      2. Si la probabilidad de riesgo es MENOR a 0.85:
-                                        - No es seguro hacer sobrecupo. Solo mantendremos la cita en observación.
-                                        - ActionType: "MONITOR_APPOINTMENT"
-                                        - Endpoint: "https://api.medcareos.com/v1/appointments/monitor"
-                                        - Payload: Debe incluir "resourceId" y "requiresAction": false.
+                                     - No es seguro hacer sobrecupo automático. Debes enviar una propuesta para que un humano la apruebe (HITL).
+                                     - ActionType: "PROPOSE_RESOLUTION"
+                                     - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/resolutions/propose"
+                                     - Payload: Debe incluir "resourceId", "riskProbability": <el valor del riesgo>, y "aiPlanJson": <stringficación del JSON de todo tu plan>.
                                      """;
         
         // razonamiento cognitivo: el modelo asume el control
@@ -66,6 +69,22 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         // persistencia
         _repository.Add(resolutionTask);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
+        
+        foreach (var action in plan.ProposedActions)
+        {
+            if (!string.IsNullOrWhiteSpace(action.Endpoint))
+            {
+                try 
+                {
+                    // Disparo 100% ciego con la URL que indicó el LLM
+                    await _webhookDispatcher.DispatchAsync(action.Endpoint, action.Payload, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ERROR WEBHOOK] Falló la entrega hacia {action.Endpoint}: {ex.Message}");
+                }
+            }
+        }
         
         return resolutionTask.Id;
     }

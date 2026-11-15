@@ -4,6 +4,7 @@ using MassTransit.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Omro.Application.IntegrationEvents;
+using Omro.Application.Interfaces;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 
 // Importa tus dominios reales (Ajusta los namespaces según tu proyecto)
@@ -30,6 +31,8 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
 
         services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
+        // Mock del Webhook para que el test no intente hacer llamadas HTTP reales
+        services.AddScoped<IWebhookDispatcher>(sp => new Moq.Mock<IWebhookDispatcher>().Object);
         
         services.AddScoped<Application.Interfaces.ICognitiveOrchestrator, FakeCognitiveOrchestrator>();
 

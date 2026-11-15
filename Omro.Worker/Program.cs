@@ -5,6 +5,7 @@ using Omro.Application.Interfaces;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Domain.Repositories;
 using Omro.Infrastructure.CognitiveServices.Agents;
+using Omro.Infrastructure.HttpClients;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
 using Omro.Worker;

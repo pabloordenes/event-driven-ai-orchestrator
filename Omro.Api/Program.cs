@@ -7,6 +7,7 @@ using Omro.Infrastructure.Persistence.Repositories;
 using Omro.Api.Consumers;
 using Omro.Application.Interfaces;
 using Omro.Infrastructure.CognitiveServices.Agents;
+using Omro.Infrastructure.HttpClients;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -24,6 +25,7 @@ builder.Services.AddMediatR(cfg =>
 builder.Services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<ICognitiveOrchestrator, GeminiCognitiveOrchestrator>();
+builder.Services.AddHttpClient<IWebhookDispatcher, WebhookDispatcher>();
 
 // masstransit & rabbitmq
 builder.Services.AddMassTransit(x =>
