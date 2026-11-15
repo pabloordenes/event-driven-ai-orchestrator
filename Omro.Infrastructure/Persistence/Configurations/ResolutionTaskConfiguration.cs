@@ -12,7 +12,11 @@ public class ResolutionTaskConfiguration : IEntityTypeConfiguration<ResolutionTa
         
         builder.HasKey(t => t.Id);
         
-        // guardamos el enum como tetto "Ingested"
+        builder.Property(t => t.TenantId)
+            .HasColumnName("tenant_id")
+            .IsRequired();
+        
+        // guardamos el enum como texto "Ingested"
         builder.Property(t => t.Status)
             .HasConversion<string>()
             .IsRequired();
@@ -23,6 +27,7 @@ public class ResolutionTaskConfiguration : IEntityTypeConfiguration<ResolutionTa
         // patron value object
         builder.OwnsOne(t => t.Anomaly, a =>
         {
+            
             a.Property(p => p.RiskProbability)
                 .HasColumnName("risk_probability")
                 .HasColumnType("numeric(18,4)")

@@ -5,6 +5,9 @@ using Omro.Domain.Repositories;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
 using Omro.Api.Consumers;
+using Omro.Application.Interfaces;
+using Omro.Infrastructure.CognitiveServices.Agents;
+using Omro.Infrastructure.HttpClients;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -21,6 +24,8 @@ builder.Services.AddMediatR(cfg =>
     
 builder.Services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
+builder.Services.AddScoped<ICognitiveOrchestrator, GeminiCognitiveOrchestrator>();
+builder.Services.AddHttpClient<IWebhookDispatcher, WebhookDispatcher>();
 
 // masstransit & rabbitmq
 builder.Services.AddMassTransit(x =>
@@ -50,6 +55,21 @@ if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
+
+// simulador de medcareOS
+app.MapPost("/api/test-gemini", async (IPublishEndpoint publisher) =>
+    {
+        var simulacro = new Omro.Application.IntegrationEvents.AnomalyIntegrationEvent(
+            TenantId: Guid.NewGuid(), // Simulamos un inquilino nuevo
+            RiskProbability: 0.90m,   // Riesgo alto para forzar una decisión de la IA
+            ResourceId: Guid.NewGuid()
+        );
+
+        await publisher.Publish(simulacro);
+        return Results.Ok(new { Mensaje = "Anomalía inyectada en RabbitMQ", Datos = simulacro });
+    })
+    .WithName("TestGeminiOrchestrator")
+    .WithOpenApi();
 
 app.UseHttpsRedirection();
 
