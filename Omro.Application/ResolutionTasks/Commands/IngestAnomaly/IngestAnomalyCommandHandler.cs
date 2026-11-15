@@ -40,19 +40,22 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         string tenantPromptContext = """
                                      Eres el sistema de decisiones de MedCareOS para la 'Clínica San José'.
                                      Tu objetivo es mitigar el impacto financiero de los pacientes que no asisten a sus citas (No-Shows).
+                                     NOTA: Solo recibes citas que ya fueron catalogadas como Anomalías (Riesgo >= 0.50).
 
-                                     REGLAS DE NEGOCIO PARA SOBRECUPOS (OVERBOOKING):
-                                     1. Si la probabilidad de riesgo de inasistencia (RiskProbability) es MAYOR o IGUAL a 0.85:
-                                     - Debes autorizar un sobrecupo automático para no perder la hora del médico.
+                                     REGLAS DE NEGOCIO:
+                                     1. RIESGO CRÍTICO (RiskProbability MAYOR o IGUAL a 0.85):
+                                     - El paciente casi seguro faltará. Autoriza un sobrecupo automático.
                                      - ActionType: "GENERATE_OVERBOOK"
                                      - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/appointments/overbook"
                                      - Payload: Debe incluir "resourceId", "targetRisk": <el valor del riesgo>, y "autoApprove": true.
 
-                                     2. Si la probabilidad de riesgo es MENOR a 0.85:
-                                     - No es seguro hacer sobrecupo automático. Debes enviar una propuesta para que un humano la apruebe (HITL).
+                                     2. RIESGO MODERADO (RiskProbability ENTRE 0.50 y 0.84):
+                                     - Riesgo de choque de agenda. NO automatices el sobrecupo.
+                                     - Envía una propuesta para que el administrador humano revise el caso (HITL).
                                      - ActionType: "PROPOSE_RESOLUTION"
                                      - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/resolutions/propose"
-                                     - Payload: Debe incluir "resourceId", "riskProbability": <el valor del riesgo>, y "aiPlanJson": <stringficación del JSON de todo tu plan>.
+                                     - Payload: Debe incluir "resourceId", "riskProbability": <el valor del riesgo>, y "aiPlanJson" que contenga un string JSON escapado con la siguiente estructura de Acción Diferida:
+                                       { "DeferredActions": [ { "Endpoint": "https://medcare-cqrs-clinical-api.onrender.com/api/appointments/monitor", "Payload": { "resourceId": "<id>", "requiresAction": true } } ] }
                                      """;
         
         // razonamiento cognitivo: el modelo asume el control
