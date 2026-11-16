@@ -1,5 +1,4 @@
 using MassTransit;
-using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Omro.Application.Interfaces;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
@@ -8,33 +7,32 @@ using Omro.Infrastructure.CognitiveServices.Agents;
 using Omro.Infrastructure.HttpClients;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
-using Omro.Worker;
 using Omro.Worker.Consumers;
 
 var builder = Host.CreateApplicationBuilder(args);
 
 // 1. Configuración de MediatR (CQRS)
-builder.Services.AddMediatR(cfg => 
+builder.Services.AddMediatR(cfg =>
     cfg.RegisterServicesFromAssemblyContaining<IngestAnomalyCommand>());
 
 // 2. Configuración de Entity Framework Core (Supabase PostgreSQL)
-// Debes asegurarte de tener tu "DefaultConnection" en appsettings.json o en tus user-secrets
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection") 
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
                        ?? throw new InvalidOperationException("La cadena de conexión 'DefaultConnection' no existe.");
 
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(connectionString));
 
-// 3. Inyección de Repositorios y Unit of Work (Clean Architecture)
+// 3. Inyección de Repositorios, Unit of Work y Servicios de Infraestructura
 builder.Services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<ICognitiveOrchestrator, GeminiCognitiveOrchestrator>();
+builder.Services.AddHttpClient<IWebhookDispatcher, WebhookDispatcher>();
 
-// 4. Configuración de MassTransit (RabbitMQ / CloudAMQP)
+// 4. Configuración de MassTransit (RabbitMQ / CloudAMQP) — único host de consumers
 builder.Services.AddMassTransit(x =>
 {
-    // Registramos el consumidor que escuchará los eventos de MedCare
     x.AddConsumer<AnomalyEventConsumer>();
+    x.AddConsumer<ResolutionApprovedConsumer>();
 
     x.UsingRabbitMq((context, cfg) =>
     {
@@ -42,17 +40,15 @@ builder.Services.AddMassTransit(x =>
         var rmqUser = builder.Configuration["RabbitMq:Username"];
         var rmqPass = builder.Configuration["RabbitMq:Password"];
 
-        cfg.Host(rmqHost, rmqUser, h => {
-            h.Username(rmqUser);
-            h.Password(rmqPass);
+        cfg.Host(rmqHost, rmqUser, h =>
+        {
+            h.Username(rmqUser!);
+            h.Password(rmqPass!);
         });
-        
+
         cfg.ConfigureEndpoints(context);
     });
 });
-
-// 5. BackgroundService base (Opcional, pero se mantiene por estructura del Worker)
-builder.Services.AddHostedService<Worker>();
 
 var host = builder.Build();
 host.Run();

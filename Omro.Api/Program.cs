@@ -1,82 +1,54 @@
 using MassTransit;
-using Microsoft.EntityFrameworkCore;
-using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
-using Omro.Domain.Repositories;
-using Omro.Infrastructure.Persistence;
-using Omro.Infrastructure.Persistence.Repositories;
-using Omro.Api.Consumers;
-using Omro.Application.Interfaces;
-using Omro.Infrastructure.CognitiveServices.Agents;
-using Omro.Infrastructure.HttpClients;
+using Omro.Contracts.Events;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// supabase
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection") 
-                       ?? throw new InvalidOperationException("Falta DefaultConnection.");
-                       
-builder.Services.AddDbContext<ApplicationDbContext>(options =>
-    options.UseNpgsql(connectionString));
-
-// CQRS y core
-builder.Services.AddMediatR(cfg => 
-    cfg.RegisterServicesFromAssemblyContaining<IngestAnomalyCommand>());
-    
-builder.Services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
-builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
-builder.Services.AddScoped<ICognitiveOrchestrator, GeminiCognitiveOrchestrator>();
-builder.Services.AddHttpClient<IWebhookDispatcher, WebhookDispatcher>();
-
-// masstransit & rabbitmq
+// MassTransit únicamente como publicador para endpoints de diagnóstico en Development
 builder.Services.AddMassTransit(x =>
 {
-    x.AddConsumer<AnomalyEventConsumer>();
-
     x.UsingRabbitMq((context, cfg) =>
     {
         var rmqHost = builder.Configuration["RabbitMq:Host"];
         var rmqUser = builder.Configuration["RabbitMq:Username"];
         var rmqPass = builder.Configuration["RabbitMq:Password"];
 
-        cfg.Host(rmqHost, rmqUser, h => {
-            h.Username(rmqUser);
-            h.Password(rmqPass);
+        cfg.Host(rmqHost, rmqUser, h =>
+        {
+            h.Username(rmqUser!);
+            h.Password(rmqPass!);
         });
-        
+
         cfg.ConfigureEndpoints(context);
     });
 });
 
-// openApi
 builder.Services.AddOpenApi();
+
 var app = builder.Build();
 
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+
+    app.MapPost("/api/test-gemini", async (IPublishEndpoint publisher) =>
+        {
+            var simulacro = new AnomalyDetected(
+                TenantId: Guid.NewGuid(),
+                CorrelationId: Guid.NewGuid(),
+                AnomalyType: "AppointmentNoShowRisk",
+                ResourceId: Guid.NewGuid(),
+                RiskProbability: 0.90m,
+                Attributes: new Dictionary<string, string>()
+            );
+
+            await publisher.Publish(simulacro);
+            return Results.Ok(new { Mensaje = "Anomalía inyectada en RabbitMQ", Datos = simulacro });
+        })
+        .WithName("TestGeminiOrchestrator");
 }
-
-// simulador de medcareOS
-app.MapPost("/api/test-gemini", async (IPublishEndpoint publisher) =>
-    {
-        var simulacro = new Omro.Contracts.Events.AnomalyDetected(
-            TenantId: Guid.NewGuid(), // Simulamos un inquilino nuevo
-            CorrelationId: Guid.NewGuid(),
-            AnomalyType: "AppointmentNoShowRisk",
-            ResourceId: Guid.NewGuid(),
-            RiskProbability: 0.90m,   // Riesgo alto para forzar una decisión de la IA
-            Attributes: new Dictionary<string, string>()
-        );
-
-        await publisher.Publish(simulacro);
-        return Results.Ok(new { Mensaje = "Anomalía inyectada en RabbitMQ", Datos = simulacro });
-    })
-    .WithName("TestGeminiOrchestrator")
-    .WithOpenApi();
 
 app.UseHttpsRedirection();
 
-// health check
 app.MapGet("/health", () => Results.Ok("OMRO Orchestrator is running"));
 
 app.Run();

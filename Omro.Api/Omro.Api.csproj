@@ -9,18 +9,11 @@
 
     <ItemGroup>
         <PackageReference Include="MassTransit.RabbitMQ" Version="8.3.3" />
-        <PackageReference Include="MediatR" Version="15.0.0" />
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.8" />
-        <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.8">
-          <PrivateAssets>all</PrivateAssets>
-          <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-        </PackageReference>
-        <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
     </ItemGroup>
 
     <ItemGroup>
-      <ProjectReference Include="..\Omro.Infrastructure\Omro.Infrastructure.csproj" />
-      <ProjectReference Include="..\Omro.Application\Omro.Application.csproj" />
+      <ProjectReference Include="..\Omro.Contracts\Omro.Contracts.csproj" />
     </ItemGroup>
 
 </Project>

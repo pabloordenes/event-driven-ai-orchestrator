@@ -1,10 +1,10 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using MassTransit;
 using Microsoft.Extensions.Logging;
 using Omro.Application.Interfaces;
 using Omro.Contracts.Events;
 
-namespace Omro.Api.Consumers;
+namespace Omro.Worker.Consumers;
 
 public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
 {
@@ -22,9 +22,8 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
         var message = context.Message;
         _logger.LogInformation("OMRO: Aprobación HITL recibida para tarea {TaskId}. Buscando acciones diferidas...", message.ResolutionTaskId);
 
-        // Deserializamos buscando ESPECÍFICAMENTE la caja fuerte "DeferredActions" que el LLM armó
         var plan = JsonSerializer.Deserialize<DeferredPlanDto>(
-            message.AiPlanJson, 
+            message.AiPlanJson,
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
         if (plan?.DeferredActions != null)
@@ -33,9 +32,8 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
             {
                 if (!string.IsNullOrWhiteSpace(action.Endpoint))
                 {
-                    try 
+                    try
                     {
-                        // OMRO dispara CUALQUIER webhook (Sobrecupo, Cancelar, WhatsApp) ciegamente
                         _logger.LogInformation("OMRO: Ejecutando Acción Diferida hacia {Endpoint}", action.Endpoint);
                         await _webhookDispatcher.DispatchAsync(action.Endpoint, action.Payload, context.CancellationToken);
                     }
@@ -52,7 +50,6 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
         }
     }
 
-    // DTOs privados para mapear la estructura de la Acción Diferida
     private record DeferredPlanDto(List<WebhookActionDto> DeferredActions);
     private record WebhookActionDto(string Endpoint, Dictionary<string, object> Payload);
 }
