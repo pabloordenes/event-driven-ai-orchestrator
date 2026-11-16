@@ -50,9 +50,13 @@ builder.Services.AddMassTransit(x =>
     x.UsingRabbitMq((context, cfg) =>
     {
         var rmqHost = builder.Configuration["RabbitMq:Host"] ?? "localhost";
-        var rmqVHost = builder.Configuration["RabbitMq:VirtualHost"] ?? "/";
         var rmqUser = builder.Configuration["RabbitMq:Username"] ?? "guest";
         var rmqPass = builder.Configuration["RabbitMq:Password"] ?? "guest";
+        var rmqVHost = builder.Configuration["RabbitMq:VirtualHost"];
+        if (string.IsNullOrWhiteSpace(rmqVHost))
+        {
+            rmqVHost = rmqHost is "localhost" or "127.0.0.1" or "rabbitmq" ? "/" : rmqUser;
+        }
 
         cfg.Host(rmqHost, rmqVHost, h =>
         {

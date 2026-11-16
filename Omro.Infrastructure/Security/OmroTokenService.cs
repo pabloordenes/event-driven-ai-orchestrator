@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -16,29 +17,53 @@ public class OmroTokenService : IOmroTokenService, IDisposable
     private readonly RSA _rsa;
     private readonly SigningCredentials _signingCredentials;
 
-    public OmroTokenService(IOptions<OmroServiceAuthOptions> options, ILogger<OmroTokenService> logger)
+    public OmroTokenService(
+        IOptions<OmroServiceAuthOptions> options,
+        ILogger<OmroTokenService> logger,
+        IConfiguration? configuration = null)
     {
         _options = options.Value;
         _rsa = RSA.Create(2048);
 
-        if (!string.IsNullOrWhiteSpace(_options.PrivateKeyContent))
+        var pem = ResolvePrivateKeyPem(_options, configuration);
+        if (!string.IsNullOrWhiteSpace(pem))
         {
-            _rsa.ImportFromPem(_options.PrivateKeyContent.ToCharArray());
-        }
-        else if (!string.IsNullOrWhiteSpace(_options.PrivateKeyPath) && File.Exists(_options.PrivateKeyPath))
-        {
-            var pem = File.ReadAllText(_options.PrivateKeyPath);
-            _rsa.ImportFromPem(pem.ToCharArray());
+            _rsa.ImportFromPem(pem.Replace("\\n", "\n").ToCharArray());
         }
         else
         {
             logger.LogWarning(
-                "No se configuró ServiceAuth:PrivateKeyContent ni ServiceAuth:PrivateKeyPath. " +
+                "No se configuró ServiceAuth:PrivateKeyContent/PrivateKeyPath ni AiService:PrivateKeyContent/PrivateKeyPath. " +
                 "Se usará una clave RSA efímera en memoria para desarrollo/pruebas.");
         }
 
         var securityKey = new RsaSecurityKey(_rsa);
         _signingCredentials = new SigningCredentials(securityKey, SecurityAlgorithms.RsaSha256);
+    }
+
+    private static string? ResolvePrivateKeyPem(OmroServiceAuthOptions options, IConfiguration? configuration)
+    {
+        if (!string.IsNullOrWhiteSpace(options.PrivateKeyContent))
+            return options.PrivateKeyContent;
+
+        if (!string.IsNullOrWhiteSpace(options.PrivateKeyPath) && File.Exists(options.PrivateKeyPath))
+            return File.ReadAllText(options.PrivateKeyPath);
+
+        var aiPrivateKeyContent = configuration?["AiService:PrivateKeyContent"];
+        if (!string.IsNullOrWhiteSpace(aiPrivateKeyContent))
+            return aiPrivateKeyContent;
+
+        var aiPrivateKeyPath = configuration?["AiService:PrivateKeyPath"];
+        if (!string.IsNullOrWhiteSpace(aiPrivateKeyPath) && File.Exists(aiPrivateKeyPath))
+            return File.ReadAllText(aiPrivateKeyPath);
+
+        if (File.Exists("/etc/secrets/dotnet-private.pem"))
+            return File.ReadAllText("/etc/secrets/dotnet-private.pem");
+
+        if (File.Exists("dotnet-private.pem"))
+            return File.ReadAllText("dotnet-private.pem");
+
+        return null;
     }
 
     public string GenerateToken()
