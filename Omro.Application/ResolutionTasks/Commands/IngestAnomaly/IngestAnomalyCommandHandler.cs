@@ -26,10 +26,24 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
     
     public async Task<Guid> Handle(IngestAnomalyCommand request, CancellationToken cancellationToken)
     {
+        var existingTask = await _repository.GetByKeyAsync(
+            request.TenantId,
+            request.ResourceId,
+            request.AnomalyType,
+            cancellationToken);
+
+        if (existingTask != null)
+        {
+            Console.WriteLine($"[OMRO IDEMPOTENCIA] Anomalía duplicada ({request.TenantId}, {request.ResourceId}, {request.AnomalyType}). Retornando tarea existente {existingTask.Id}.");
+            return existingTask.Id;
+        }
+
         // rehidratacion 
         var anomalyEvent = new AnomalyEvent(
             RiskProbability: request.RiskProbability,
-            ResourceId: request.ResourceId);
+            ResourceId: request.ResourceId,
+            AnomalyType: request.AnomalyType,
+            CorrelationId: request.CorrelationId);
         
         var resolutionTask = new ResolutionTask(request.TenantId, anomalyEvent);
         
@@ -40,19 +54,22 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         string tenantPromptContext = """
                                      Eres el sistema de decisiones de MedCareOS para la 'Clínica San José'.
                                      Tu objetivo es mitigar el impacto financiero de los pacientes que no asisten a sus citas (No-Shows).
+                                     NOTA: Solo recibes citas que ya fueron catalogadas como Anomalías (Riesgo >= 0.50).
 
-                                     REGLAS DE NEGOCIO PARA SOBRECUPOS (OVERBOOKING):
-                                     1. Si la probabilidad de riesgo de inasistencia (RiskProbability) es MAYOR o IGUAL a 0.85:
-                                     - Debes autorizar un sobrecupo automático para no perder la hora del médico.
+                                     REGLAS DE NEGOCIO:
+                                     1. RIESGO CRÍTICO (RiskProbability MAYOR o IGUAL a 0.85, es decir >= 0.85):
+                                     - El paciente casi seguro faltará. Autoriza un sobrecupo automático.
                                      - ActionType: "GENERATE_OVERBOOK"
                                      - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/appointments/overbook"
                                      - Payload: Debe incluir "resourceId", "targetRisk": <el valor del riesgo>, y "autoApprove": true.
 
-                                     2. Si la probabilidad de riesgo es MENOR a 0.85:
-                                     - No es seguro hacer sobrecupo automático. Debes enviar una propuesta para que un humano la apruebe (HITL).
+                                     2. RIESGO MODERADO (RiskProbability MAYOR o IGUAL a 0.50 y MENOR a 0.85, es decir >= 0.50 y < 0.85):
+                                     - Riesgo de choque de agenda. NO automatices el sobrecupo.
+                                     - Envía una propuesta para que el administrador humano revise el caso (HITL).
                                      - ActionType: "PROPOSE_RESOLUTION"
                                      - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/resolutions/propose"
-                                     - Payload: Debe incluir "resourceId", "riskProbability": <el valor del riesgo>, y "aiPlanJson": <stringficación del JSON de todo tu plan>.
+                                     - Payload: Debe incluir "resourceId", "riskProbability": <el valor del riesgo>, y "aiPlanJson" que contenga un string JSON escapado con la siguiente estructura de Acción Diferida:
+                                       { "DeferredActions": [ { "Endpoint": "https://medcare-cqrs-clinical-api.onrender.com/api/appointments/monitor", "Payload": { "resourceId": "<id>", "requiresAction": true } } ] }
                                      """;
         
         // razonamiento cognitivo: el modelo asume el control
@@ -63,21 +80,35 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         
         Console.WriteLine($"\n[MEDCAREOS DECISIÓN CLÍNICA]\n{System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true })}\n");
         
-        // mutacion de dominio final: empaquetamos el JSON y los costos
-        resolutionTask.ProposePlan(plan, promptTokens, completionTokens);
-        
+        // mutacion de dominio final: empaquetamos el JSON y los costos o escalamos a revisión humana
+        if (plan.IsFallback)
+        {
+            resolutionTask.MarkNeedsHumanReview(plan.Reasoning, plan);
+        }
+        else
+        {
+            resolutionTask.ProposePlan(plan, promptTokens, completionTokens);
+        }
+
         // persistencia
         _repository.Add(resolutionTask);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
-        
-        foreach (var action in plan.ProposedActions)
+
+        if (plan.IsFallback || plan.ProposedActions == null || plan.ProposedActions.Count == 0)
         {
+            return resolutionTask.Id;
+        }
+
+        for (int i = 0; i < plan.ProposedActions.Count; i++)
+        {
+            var action = plan.ProposedActions[i];
             if (!string.IsNullOrWhiteSpace(action.Endpoint))
             {
-                try 
+                try
                 {
-                    // Disparo 100% ciego con la URL que indicó el LLM
-                    await _webhookDispatcher.DispatchAsync(action.Endpoint, action.Payload, cancellationToken);
+                    var idempotencyKey = $"{resolutionTask.Id}:{i}";
+                    // Disparo 100% ciego con la URL que indicó el LLM + clave idempotente
+                    await _webhookDispatcher.DispatchAsync(action.Endpoint, action.Payload, cancellationToken, idempotencyKey);
                 }
                 catch (Exception ex)
                 {
@@ -85,7 +116,7 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                 }
             }
         }
-        
+
         return resolutionTask.Id;
     }
 }

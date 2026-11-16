@@ -4,9 +4,7 @@ WORKDIR /src
 
 # Copiar solo los csproj primero para aprovechar la caché de capas de Docker
 COPY ["Omro.Api/Omro.Api.csproj", "Omro.Api/"]
-COPY ["Omro.Application/Omro.Application.csproj", "Omro.Application/"]
-COPY ["Omro.Infrastructure/Omro.Infrastructure.csproj", "Omro.Infrastructure/"]
-COPY ["Omro.Domain/Omro.Domain.csproj", "Omro.Domain/"]
+COPY ["Omro.Contracts/Omro.Contracts.csproj", "Omro.Contracts/"]
 
 # Restaurar dependencias
 RUN dotnet restore "Omro.Api/Omro.Api.csproj"

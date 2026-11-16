@@ -1,4 +1,5 @@
-﻿using System.Net.Http.Json;
+﻿using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using Microsoft.Extensions.Logging;
 using Omro.Application.Interfaces;
 
@@ -8,19 +9,43 @@ public class WebhookDispatcher : IWebhookDispatcher
 {
     private readonly HttpClient _httpClient;
     private readonly ILogger<WebhookDispatcher> _logger;
+    private readonly IOmroTokenService? _tokenService;
 
-    public WebhookDispatcher(HttpClient httpClient, ILogger<WebhookDispatcher> logger)
+    public WebhookDispatcher(
+        HttpClient httpClient,
+        ILogger<WebhookDispatcher> logger,
+        IOmroTokenService? tokenService = null)
     {
         _httpClient = httpClient;
         _logger = logger;
+        _tokenService = tokenService;
     }
 
-    public async Task DispatchAsync(string endpoint, Dictionary<string, object> payload, CancellationToken cancellationToken)
+    public async Task DispatchAsync(
+        string endpoint,
+        Dictionary<string, object> payload,
+        CancellationToken cancellationToken,
+        string? idempotencyKey = null)
     {
         _logger.LogInformation("OMRO disparando Webhook dinámico hacia: {Endpoint}", endpoint);
 
-        // Disparo ciego del payload generado por la IA hacia la URL indicada por la IA
-        var response = await _httpClient.PostAsJsonAsync(endpoint, payload, cancellationToken);
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = JsonContent.Create(payload)
+        };
+
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            request.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
+        }
+
+        if (_tokenService != null)
+        {
+            var token = _tokenService.GenerateToken();
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        }
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
 
         if (!response.IsSuccessStatusCode)
         {

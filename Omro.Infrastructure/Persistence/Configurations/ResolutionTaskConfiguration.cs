@@ -27,14 +27,23 @@ public class ResolutionTaskConfiguration : IEntityTypeConfiguration<ResolutionTa
         // patron value object
         builder.OwnsOne(t => t.Anomaly, a =>
         {
-            
             a.Property(p => p.RiskProbability)
                 .HasColumnName("risk_probability")
                 .HasColumnType("numeric(18,4)")
                 .IsRequired();
-            
+
             a.Property(p => p.ResourceId)
                 .HasColumnName("resource_id")
+                .IsRequired();
+
+            a.Property(p => p.AnomalyType)
+                .HasColumnName("anomaly_type")
+                .HasMaxLength(100)
+                .HasDefaultValue("AppointmentNoShowRisk")
+                .IsRequired();
+
+            a.Property(p => p.CorrelationId)
+                .HasColumnName("correlation_id")
                 .IsRequired();
         });
 

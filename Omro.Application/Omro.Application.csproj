@@ -11,6 +11,7 @@
     </ItemGroup>
 
     <ItemGroup>
+      <ProjectReference Include="..\Omro.Contracts\Omro.Contracts.csproj" />
       <ProjectReference Include="..\Omro.Domain\Omro.Domain.csproj" />
     </ItemGroup>
 

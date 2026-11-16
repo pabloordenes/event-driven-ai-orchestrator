@@ -2,5 +2,9 @@
 
 public interface IWebhookDispatcher
 {
-    Task DispatchAsync(string endpoint, Dictionary<string, object> payload, CancellationToken cancellationToken);
+    Task DispatchAsync(
+        string endpoint,
+        Dictionary<string, object> payload,
+        CancellationToken cancellationToken,
+        string? idempotencyKey = null);
 }

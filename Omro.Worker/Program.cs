@@ -1,58 +1,72 @@
 using MassTransit;
-using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Omro.Application.Interfaces;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Domain.Repositories;
 using Omro.Infrastructure.CognitiveServices.Agents;
+using Omro.Infrastructure.Configuration;
 using Omro.Infrastructure.HttpClients;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
-using Omro.Worker;
+using Omro.Infrastructure.Security;
 using Omro.Worker.Consumers;
 
 var builder = Host.CreateApplicationBuilder(args);
 
 // 1. Configuración de MediatR (CQRS)
-builder.Services.AddMediatR(cfg => 
+builder.Services.AddMediatR(cfg =>
     cfg.RegisterServicesFromAssemblyContaining<IngestAnomalyCommand>());
 
 // 2. Configuración de Entity Framework Core (Supabase PostgreSQL)
-// Debes asegurarte de tener tu "DefaultConnection" en appsettings.json o en tus user-secrets
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection") 
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
                        ?? throw new InvalidOperationException("La cadena de conexión 'DefaultConnection' no existe.");
 
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(connectionString));
 
-// 3. Inyección de Repositorios y Unit of Work (Clean Architecture)
+// 3. Inyección de Repositorios, Unit of Work y Servicios de Infraestructura
+builder.Services.Configure<GroqOptions>(
+    builder.Configuration.GetSection(GroqOptions.SectionName));
+builder.Services.Configure<OmroServiceAuthOptions>(
+    builder.Configuration.GetSection(OmroServiceAuthOptions.SectionName));
+
+builder.Services.AddSingleton<IOmroTokenService, OmroTokenService>();
 builder.Services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
-builder.Services.AddScoped<ICognitiveOrchestrator, GeminiCognitiveOrchestrator>();
+builder.Services.AddHttpClient<ICognitiveOrchestrator, GroqCognitiveOrchestrator>((sp, client) =>
+{
+    var groqOptions = sp.GetRequiredService<IOptions<GroqOptions>>().Value;
+    client.BaseAddress = new Uri(groqOptions.BaseUrl.TrimEnd('/') + "/");
+});
+builder.Services.AddHttpClient<IWebhookDispatcher, WebhookDispatcher>();
 
-// 4. Configuración de MassTransit (RabbitMQ / CloudAMQP)
+// 4. Configuración de MassTransit (RabbitMQ / CloudAMQP) — único host de consumers
 builder.Services.AddMassTransit(x =>
 {
-    // Registramos el consumidor que escuchará los eventos de MedCare
     x.AddConsumer<AnomalyEventConsumer>();
+    x.AddConsumer<ResolutionApprovedConsumer>();
 
     x.UsingRabbitMq((context, cfg) =>
     {
-        var rmqHost = builder.Configuration["RabbitMq:Host"];
-        var rmqUser = builder.Configuration["RabbitMq:Username"];
-        var rmqPass = builder.Configuration["RabbitMq:Password"];
+        var rmqHost = builder.Configuration["RabbitMq:Host"] ?? "localhost";
+        var rmqUser = builder.Configuration["RabbitMq:Username"] ?? "guest";
+        var rmqPass = builder.Configuration["RabbitMq:Password"] ?? "guest";
+        var rmqVHost = builder.Configuration["RabbitMq:VirtualHost"];
+        if (string.IsNullOrWhiteSpace(rmqVHost))
+        {
+            rmqVHost = rmqHost is "localhost" or "127.0.0.1" or "rabbitmq" ? "/" : rmqUser;
+        }
 
-        cfg.Host(rmqHost, rmqUser, h => {
+        cfg.Host(rmqHost, rmqVHost, h =>
+        {
             h.Username(rmqUser);
             h.Password(rmqPass);
         });
-        
+
         cfg.ConfigureEndpoints(context);
     });
 });
-
-// 5. BackgroundService base (Opcional, pero se mantiene por estructura del Worker)
-builder.Services.AddHostedService<Worker>();
 
 var host = builder.Build();
 host.Run();
