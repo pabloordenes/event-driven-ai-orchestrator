@@ -9,6 +9,7 @@ using Omro.Infrastructure.Configuration;
 using Omro.Infrastructure.HttpClients;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
+using Omro.Infrastructure.Security;
 using Omro.Worker.Consumers;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -27,7 +28,10 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
 // 3. Inyección de Repositorios, Unit of Work y Servicios de Infraestructura
 builder.Services.Configure<GroqOptions>(
     builder.Configuration.GetSection(GroqOptions.SectionName));
+builder.Services.Configure<OmroServiceAuthOptions>(
+    builder.Configuration.GetSection(OmroServiceAuthOptions.SectionName));
 
+builder.Services.AddSingleton<IOmroTokenService, OmroTokenService>();
 builder.Services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddHttpClient<ICognitiveOrchestrator, GroqCognitiveOrchestrator>((sp, client) =>

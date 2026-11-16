@@ -153,6 +153,61 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         handlerMock.VerifyNoOtherCalls();
     }
 
+    [Fact]
+    public async Task WebhookDispatcher_ShouldAttachRs256BearerToken()
+    {
+        using var rsa = System.Security.Cryptography.RSA.Create(2048);
+        var authOptions = Microsoft.Extensions.Options.Options.Create(new Omro.Infrastructure.Configuration.OmroServiceAuthOptions
+        {
+            Issuer = "omro-orchestrator",
+            Audience = "medcareos-api",
+            Role = "omro_service",
+            PrivateKeyContent = rsa.ExportRSAPrivateKeyPem()
+        });
+        var tokenService = new Omro.Infrastructure.Security.OmroTokenService(
+            authOptions,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Omro.Infrastructure.Security.OmroTokenService>.Instance);
+
+        var captureHandler = new CapturingHttpMessageHandler();
+        var client = new HttpClient(captureHandler);
+        var dispatcher = new Omro.Infrastructure.HttpClients.WebhookDispatcher(
+            client,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Omro.Infrastructure.HttpClients.WebhookDispatcher>.Instance,
+            tokenService);
+
+        await dispatcher.DispatchAsync("https://medcare.test/api/appointments/overbook", new Dictionary<string, object> { ["ok"] = true }, CancellationToken.None);
+
+        captureHandler.LastRequest.Should().NotBeNull();
+        captureHandler.LastRequest!.Headers.Authorization.Should().NotBeNull();
+        captureHandler.LastRequest!.Headers.Authorization!.Scheme.Should().Be("Bearer");
+
+        var jwt = captureHandler.LastRequest.Headers.Authorization.Parameter!;
+        var validationHandler = new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler { MapInboundClaims = false };
+        var principal = validationHandler.ValidateToken(jwt, new Microsoft.IdentityModel.Tokens.TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new Microsoft.IdentityModel.Tokens.RsaSecurityKey(rsa),
+            ValidateIssuer = true,
+            ValidIssuer = "omro-orchestrator",
+            ValidateAudience = true,
+            ValidAudience = "medcareos-api",
+            ValidateLifetime = true
+        }, out _);
+
+        principal.FindFirst("role")?.Value.Should().Be("omro_service");
+    }
+
+    private sealed class CapturingHttpMessageHandler : HttpMessageHandler
+    {
+        public HttpRequestMessage? LastRequest { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK));
+        }
+    }
+
     private sealed class FailingHttpMessageHandler : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
