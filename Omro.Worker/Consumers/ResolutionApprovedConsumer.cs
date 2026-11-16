@@ -28,14 +28,22 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
 
         if (plan?.DeferredActions != null)
         {
-            foreach (var action in plan.DeferredActions)
+            for (int i = 0; i < plan.DeferredActions.Count; i++)
             {
+                var action = plan.DeferredActions[i];
                 if (!string.IsNullOrWhiteSpace(action.Endpoint))
                 {
                     try
                     {
-                        _logger.LogInformation("OMRO: Ejecutando Acción Diferida hacia {Endpoint}", action.Endpoint);
-                        await _webhookDispatcher.DispatchAsync(action.Endpoint, action.Payload, context.CancellationToken);
+                        var idempotencyKey = $"{message.ResolutionTaskId}:deferred:{i}";
+                        _logger.LogInformation(
+                            "OMRO: Ejecutando Acción Diferida hacia {Endpoint} (Idempotency-Key: {IdempotencyKey})",
+                            action.Endpoint, idempotencyKey);
+                        await _webhookDispatcher.DispatchAsync(
+                            action.Endpoint,
+                            action.Payload,
+                            context.CancellationToken,
+                            idempotencyKey);
                     }
                     catch (Exception ex)
                     {

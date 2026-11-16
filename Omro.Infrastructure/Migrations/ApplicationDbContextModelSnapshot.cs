@@ -107,6 +107,18 @@ namespace Omro.Infrastructure.Migrations
                             b1.Property<Guid>("ResolutionTaskId")
                                 .HasColumnType("uuid");
 
+                            b1.Property<string>("AnomalyType")
+                                .IsRequired()
+                                .ValueGeneratedOnAdd()
+                                .HasMaxLength(100)
+                                .HasColumnType("character varying(100)")
+                                .HasDefaultValue("AppointmentNoShowRisk")
+                                .HasColumnName("anomaly_type");
+
+                            b1.Property<Guid>("CorrelationId")
+                                .HasColumnType("uuid")
+                                .HasColumnName("correlation_id");
+
                             b1.Property<Guid>("ResourceId")
                                 .HasColumnType("uuid")
                                 .HasColumnName("resource_id");
