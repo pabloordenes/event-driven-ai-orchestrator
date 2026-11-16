@@ -2,11 +2,11 @@
 using MassTransit;
 using Microsoft.Extensions.Logging;
 using Omro.Application.Interfaces;
-using Omro.Domain.ResolutionTasks;
+using Omro.Contracts.Events;
 
 namespace Omro.Api.Consumers;
 
-public class ResolutionApprovedConsumer : IConsumer<ResolutionApprovedEvent>
+public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
 {
     private readonly IWebhookDispatcher _webhookDispatcher;
     private readonly ILogger<ResolutionApprovedConsumer> _logger;
@@ -17,7 +17,7 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApprovedEvent>
         _logger = logger;
     }
 
-    public async Task Consume(ConsumeContext<ResolutionApprovedEvent> context)
+    public async Task Consume(ConsumeContext<ResolutionApproved> context)
     {
         var message = context.Message;
         _logger.LogInformation("OMRO: Aprobación HITL recibida para tarea {TaskId}. Buscando acciones diferidas...", message.ResolutionTaskId);

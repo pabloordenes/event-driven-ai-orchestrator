@@ -29,7 +29,9 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         // rehidratacion 
         var anomalyEvent = new AnomalyEvent(
             RiskProbability: request.RiskProbability,
-            ResourceId: request.ResourceId);
+            ResourceId: request.ResourceId,
+            AnomalyType: request.AnomalyType,
+            CorrelationId: request.CorrelationId);
         
         var resolutionTask = new ResolutionTask(request.TenantId, anomalyEvent);
         
@@ -43,13 +45,13 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                                      NOTA: Solo recibes citas que ya fueron catalogadas como Anomalías (Riesgo >= 0.50).
 
                                      REGLAS DE NEGOCIO:
-                                     1. RIESGO CRÍTICO (RiskProbability MAYOR o IGUAL a 0.85):
+                                     1. RIESGO CRÍTICO (RiskProbability MAYOR o IGUAL a 0.85, es decir >= 0.85):
                                      - El paciente casi seguro faltará. Autoriza un sobrecupo automático.
                                      - ActionType: "GENERATE_OVERBOOK"
                                      - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/appointments/overbook"
                                      - Payload: Debe incluir "resourceId", "targetRisk": <el valor del riesgo>, y "autoApprove": true.
 
-                                     2. RIESGO MODERADO (RiskProbability ENTRE 0.50 y 0.84):
+                                     2. RIESGO MODERADO (RiskProbability MAYOR o IGUAL a 0.50 y MENOR a 0.85, es decir >= 0.50 y < 0.85):
                                      - Riesgo de choque de agenda. NO automatices el sobrecupo.
                                      - Envía una propuesta para que el administrador humano revise el caso (HITL).
                                      - ActionType: "PROPOSE_RESOLUTION"
