@@ -2,5 +2,7 @@
 
 public record AnomalyEvent(
     decimal RiskProbability,
-    Guid ResourceId
-    );  
+    Guid ResourceId,
+    string AnomalyType = "AppointmentNoShowRisk",
+    Guid CorrelationId = default
+);

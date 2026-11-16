@@ -1,12 +1,11 @@
 ﻿using MassTransit;
 using MediatR;
-using Omro.Application.IntegrationEvents;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
-using Omro.Domain.ResolutionTasks;
+using Omro.Contracts.Events;
 
 namespace Omro.Api.Consumers;
 
-public class AnomalyEventConsumer : IConsumer<AnomalyIntegrationEvent>
+public class AnomalyEventConsumer : IConsumer<AnomalyDetected>
 {
     private readonly ISender _sender;
     private readonly ILogger<AnomalyEventConsumer> _logger;
@@ -17,22 +16,24 @@ public class AnomalyEventConsumer : IConsumer<AnomalyIntegrationEvent>
         _logger = logger;
     }
 
-    public async Task Consume(ConsumeContext<AnomalyIntegrationEvent> context)
+    public async Task Consume(ConsumeContext<AnomalyDetected> context)
     {
-        var message = context.Message; // estructura de anomaly event
-        
+        var message = context.Message;
+
         _logger.LogInformation(
-            "Anomalía recibida desde MedCare AI - Cita: {ResourceId}, Riesgo: {RiskProbability}",
-            message.ResourceId, message.RiskProbability
-            );
+            "Anomalía {AnomalyType} recibida - Tenant: {TenantId}, Recurso: {ResourceId}, Riesgo: {RiskProbability}, CorrelationId: {CorrelationId}",
+            message.AnomalyType, message.TenantId, message.ResourceId, message.RiskProbability, message.CorrelationId);
 
         var command = new IngestAnomalyCommand(
             TenantId: message.TenantId,
             RiskProbability: message.RiskProbability,
-            ResourceId: message.ResourceId);
-        
+            ResourceId: message.ResourceId,
+            AnomalyType: message.AnomalyType,
+            CorrelationId: message.CorrelationId,
+            Attributes: message.Attributes);
+
         Guid taskId = await _sender.Send(command, context.CancellationToken);
-        
-        _logger.LogInformation("ResolutionTask generada exitosamente con ID: {taskId}", taskId);
+
+        _logger.LogInformation("ResolutionTask generada exitosamente con ID: {TaskId}", taskId);
     }
 }

@@ -59,10 +59,13 @@ if (app.Environment.IsDevelopment())
 // simulador de medcareOS
 app.MapPost("/api/test-gemini", async (IPublishEndpoint publisher) =>
     {
-        var simulacro = new Omro.Application.IntegrationEvents.AnomalyIntegrationEvent(
+        var simulacro = new Omro.Contracts.Events.AnomalyDetected(
             TenantId: Guid.NewGuid(), // Simulamos un inquilino nuevo
+            CorrelationId: Guid.NewGuid(),
+            AnomalyType: "AppointmentNoShowRisk",
+            ResourceId: Guid.NewGuid(),
             RiskProbability: 0.90m,   // Riesgo alto para forzar una decisión de la IA
-            ResourceId: Guid.NewGuid()
+            Attributes: new Dictionary<string, string>()
         );
 
         await publisher.Publish(simulacro);
