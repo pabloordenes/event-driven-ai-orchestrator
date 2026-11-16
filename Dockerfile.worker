@@ -5,6 +5,7 @@ WORKDIR /src
 # Copiar csproj para aprovechar caché
 COPY ["Omro.Worker/Omro.Worker.csproj", "Omro.Worker/"]
 COPY ["Omro.Application/Omro.Application.csproj", "Omro.Application/"]
+COPY ["Omro.Contracts/Omro.Contracts.csproj", "Omro.Contracts/"]
 COPY ["Omro.Infrastructure/Omro.Infrastructure.csproj", "Omro.Infrastructure/"]
 COPY ["Omro.Domain/Omro.Domain.csproj", "Omro.Domain/"]
 
