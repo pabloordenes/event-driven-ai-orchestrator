@@ -38,4 +38,35 @@ public class ResolutionTaskTests
         // assert
         act.Should().Throw<InvalidOperationException>();
     }
+
+    [Fact]
+    public void MarkNeedsHumanReview_WhenStateIsAnalyzing_ShouldSetNeedsHumanReviewAndAddTrace()
+    {
+        var dummyEvent = new AnomalyEvent(RiskProbability: 0.90m, ResourceId: Guid.NewGuid());
+        var task = new ResolutionTask(Guid.NewGuid(), dummyEvent);
+        task.StartAnalysis();
+
+        var fallbackPlan = new CognitivePlan(
+            Title: "NeedsHumanReview",
+            Reasoning: "Groq timeout",
+            ConfidenceScore: 0m,
+            ProposedActions: new List<ProposedAction>(),
+            IsFallback: true);
+
+        task.MarkNeedsHumanReview("Groq timeout", fallbackPlan);
+
+        task.Status.Should().Be(ResolutionStatus.NeedsHumanReview);
+        task.ReasoningTraces.Should().Contain(t => t.StepType == "FallbackNeedsHumanReview");
+    }
+
+    [Fact]
+    public void MarkNeedsHumanReview_WhenStateIsNotAnalyzing_ShouldThrowInvalidOperationException()
+    {
+        var dummyEvent = new AnomalyEvent(RiskProbability: 0.90m, ResourceId: Guid.NewGuid());
+        var task = new ResolutionTask(Guid.NewGuid(), dummyEvent);
+
+        Action act = () => task.MarkNeedsHumanReview("Groq timeout");
+
+        act.Should().Throw<InvalidOperationException>();
+    }
 }

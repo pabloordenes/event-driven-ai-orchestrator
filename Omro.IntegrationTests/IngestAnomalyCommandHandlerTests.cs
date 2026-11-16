@@ -106,7 +106,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             string tenantPromptContext, 
             CancellationToken cancellationToken = default)
         {
-            // Simulamos lo que Gemini habría respondido en menos de 1 milisegundo
+            // Simulamos lo que Groq habría respondido en menos de 1 milisegundo
             var dummyPlan = new CognitivePlan(
                 Title: "Acción Simulada",
                 Reasoning: "Porque es un test automatizado",
@@ -115,6 +115,52 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             );
 
             return Task.FromResult((dummyPlan, 15, 25)); // Simulamos gasto de tokens
+        }
+    }
+
+    [Fact]
+    public async Task GroqFallback_WhenApiFails_ShouldPersistNeedsHumanReviewAndDispatchNoWebhooks()
+    {
+        var handlerMock = new Moq.Mock<IWebhookDispatcher>(Moq.MockBehavior.Strict);
+        var dbOptions = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        await using var db = new ApplicationDbContext(dbOptions);
+        var repo = new ResolutionTaskRepository(db);
+        var uow = new UnitOfWork(db);
+
+        var failingHttpClient = new HttpClient(new FailingHttpMessageHandler())
+        {
+            BaseAddress = new Uri("https://api.groq.com/openai/v1/")
+        };
+        var groqOptions = Microsoft.Extensions.Options.Options.Create(new Omro.Infrastructure.Configuration.GroqOptions
+        {
+            ApiKey = "test-key",
+            Model = "openai/gpt-oss-120b"
+        });
+        var config = new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build();
+        var logger = Microsoft.Extensions.Logging.Abstractions.NullLogger<Omro.Infrastructure.CognitiveServices.Agents.GroqCognitiveOrchestrator>.Instance;
+        var orchestrator = new Omro.Infrastructure.CognitiveServices.Agents.GroqCognitiveOrchestrator(failingHttpClient, groqOptions, config, logger);
+
+        var cmdHandler = new IngestAnomalyCommandHandler(repo, uow, orchestrator, handlerMock.Object);
+        var taskId = await cmdHandler.Handle(new IngestAnomalyCommand(Guid.NewGuid(), 0.91m, Guid.NewGuid()), CancellationToken.None);
+
+        failingHttpClient.DefaultRequestHeaders.Authorization.Should().BeNull();
+        var saved = await db.ResolutionTasks.FirstOrDefaultAsync(t => t.Id == taskId);
+        saved.Should().NotBeNull();
+        saved!.Status.Should().Be(ResolutionStatus.NeedsHumanReview);
+        handlerMock.VerifyNoOtherCalls();
+    }
+
+    private sealed class FailingHttpMessageHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable)
+            {
+                Content = new StringContent("Groq unavailable")
+            });
         }
     }
 }

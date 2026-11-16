@@ -68,18 +68,30 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         
         Console.WriteLine($"\n[MEDCAREOS DECISIÓN CLÍNICA]\n{System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true })}\n");
         
-        // mutacion de dominio final: empaquetamos el JSON y los costos
-        resolutionTask.ProposePlan(plan, promptTokens, completionTokens);
-        
+        // mutacion de dominio final: empaquetamos el JSON y los costos o escalamos a revisión humana
+        if (plan.IsFallback)
+        {
+            resolutionTask.MarkNeedsHumanReview(plan.Reasoning, plan);
+        }
+        else
+        {
+            resolutionTask.ProposePlan(plan, promptTokens, completionTokens);
+        }
+
         // persistencia
         _repository.Add(resolutionTask);
         await _unitOfWork.SaveChangesAsync(cancellationToken);
-        
+
+        if (plan.IsFallback || plan.ProposedActions == null || plan.ProposedActions.Count == 0)
+        {
+            return resolutionTask.Id;
+        }
+
         foreach (var action in plan.ProposedActions)
         {
             if (!string.IsNullOrWhiteSpace(action.Endpoint))
             {
-                try 
+                try
                 {
                     // Disparo 100% ciego con la URL que indicó el LLM
                     await _webhookDispatcher.DispatchAsync(action.Endpoint, action.Payload, cancellationToken);
@@ -90,7 +102,7 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                 }
             }
         }
-        
+
         return resolutionTask.Id;
     }
 }

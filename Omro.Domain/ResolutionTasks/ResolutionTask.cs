@@ -55,12 +55,33 @@ public class ResolutionTask
 
         _reasoningTraces.Add(new AgentReasoningTrace(
             resolutionTaskId: Id,
-            agentName: "SemanticKernel",
+            agentName: "GroqCognitiveOrchestrator",
             stepType: "PlanGenerated",
             traceMessage: $"Plan propuesto por IA. Costo: {promptTokens + completionTokens} tokens.",
             metadataJson: metadataJson,
             promptTokens: promptTokens,
             completionTokens: completionTokens
+        ));
+    }
+
+    public void MarkNeedsHumanReview(string reason, CognitivePlan? fallbackPlan = null)
+    {
+        if (Status != ResolutionStatus.Analyzing)
+            throw new InvalidOperationException("Solo se puede escalar a revisión humana desde el estado de análisis.");
+
+        Status = ResolutionStatus.NeedsHumanReview;
+        UpdatedAt = DateTime.UtcNow;
+
+        string? metadataJson = fallbackPlan != null ? System.Text.Json.JsonSerializer.Serialize(fallbackPlan) : null;
+
+        _reasoningTraces.Add(new AgentReasoningTrace(
+            resolutionTaskId: Id,
+            agentName: "GroqCognitiveOrchestrator",
+            stepType: "FallbackNeedsHumanReview",
+            traceMessage: $"Escalado a revisión humana sin despacho automático. Motivo: {reason}",
+            metadataJson: metadataJson,
+            promptTokens: 0,
+            completionTokens: 0
         ));
     }
 }

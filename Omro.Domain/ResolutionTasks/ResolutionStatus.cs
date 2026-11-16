@@ -6,6 +6,7 @@ public enum ResolutionStatus
     Analyzing,
     WaitingForExternalData,
     ActionProposed,
+    NeedsHumanReview,
     Resolved,
     Failed
 }

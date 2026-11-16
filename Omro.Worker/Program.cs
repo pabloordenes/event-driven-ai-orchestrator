@@ -1,9 +1,11 @@
 using MassTransit;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Omro.Application.Interfaces;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Domain.Repositories;
 using Omro.Infrastructure.CognitiveServices.Agents;
+using Omro.Infrastructure.Configuration;
 using Omro.Infrastructure.HttpClients;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
@@ -23,9 +25,16 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(connectionString));
 
 // 3. Inyección de Repositorios, Unit of Work y Servicios de Infraestructura
+builder.Services.Configure<GroqOptions>(
+    builder.Configuration.GetSection(GroqOptions.SectionName));
+
 builder.Services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
-builder.Services.AddScoped<ICognitiveOrchestrator, GeminiCognitiveOrchestrator>();
+builder.Services.AddHttpClient<ICognitiveOrchestrator, GroqCognitiveOrchestrator>((sp, client) =>
+{
+    var groqOptions = sp.GetRequiredService<IOptions<GroqOptions>>().Value;
+    client.BaseAddress = new Uri(groqOptions.BaseUrl.TrimEnd('/') + "/");
+});
 builder.Services.AddHttpClient<IWebhookDispatcher, WebhookDispatcher>();
 
 // 4. Configuración de MassTransit (RabbitMQ / CloudAMQP) — único host de consumers
