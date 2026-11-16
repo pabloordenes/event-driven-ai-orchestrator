@@ -6,20 +6,19 @@ using Microsoft.Extensions.DependencyInjection;
 using Omro.Application.Interfaces;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Contracts.Events;
-
-// Importa tus dominios reales (Ajusta los namespaces según tu proyecto)
+using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
-using Omro.Domain.Repositories; // <-- Añadido
 using Omro.Infrastructure.Persistence;
-using Omro.Infrastructure.Persistence.Repositories; // <-- Añadido
+using Omro.Infrastructure.Persistence.Repositories;
 using Omro.Worker.Consumers;
 
 namespace Omro.IntegrationTests;
 
 public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
 {
-    private ServiceProvider _provider;
-    private ITestHarness _harness;
+    private ServiceProvider _provider = null!;
+    private ITestHarness _harness = null!;
+    private Moq.Mock<IWebhookDispatcher> _webhookMock = null!;
 
     public async Task InitializeAsync()
     {
@@ -31,33 +30,33 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
 
         services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
-        // Mock del Webhook para que el test no intente hacer llamadas HTTP reales
-        services.AddScoped<IWebhookDispatcher>(sp => new Moq.Mock<IWebhookDispatcher>().Object);
-        
-        services.AddScoped<Application.Interfaces.ICognitiveOrchestrator, FakeCognitiveOrchestrator>();
 
-        // Inyectamos el repositorio y el Unit of Work simulando el entorno de producción
-        services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
-        services.AddScoped<IUnitOfWork, UnitOfWork>();
-    
-        // 2. Inyectamos MediatR
-        services.AddMediatR(cfg => 
+        _webhookMock = new Moq.Mock<IWebhookDispatcher>();
+        _webhookMock
+            .Setup(w => w.DispatchAsync(
+                Moq.It.IsAny<string>(),
+                Moq.It.IsAny<Dictionary<string, object>>(),
+                Moq.It.IsAny<CancellationToken>(),
+                Moq.It.IsAny<string?>()))
+            .Returns(Task.CompletedTask);
+        services.AddSingleton(_webhookMock.Object);
+
+        services.AddScoped<ICognitiveOrchestrator, FakeCognitiveOrchestrator>();
+
+        services.AddMediatR(cfg =>
             cfg.RegisterServicesFromAssemblyContaining<IngestAnomalyCommandHandler>());
 
-        // 3. Inyectamos el Arnés de MassTransit
         services.AddMassTransitTestHarness(x =>
         {
             x.AddConsumer<AnomalyEventConsumer>();
+            x.AddConsumer<ResolutionApprovedConsumer>();
         });
 
-        // 4. Inyectamos ILogger
         services.AddLogging();
 
-        // Construimos el motor
         _provider = services.BuildServiceProvider();
         _harness = _provider.GetRequiredService<ITestHarness>();
 
-        // Encendemos el bus virtual
         await _harness.Start();
     }
 
@@ -80,41 +79,124 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             Attributes: new Dictionary<string, string>()
         );
 
-        // 2. ACT: Publicamos en RabbitMQ virtual
+        // 2. ACT: Publicamos el contrato unificado de MedCareOS en el bus virtual
         await _harness.Bus.Publish(anomalyEvent);
 
         // 3. ASSERT
-        var isConsumedByBus = await _harness.Consumed.Any<AnomalyDetected>();
-        isConsumedByBus.Should().BeTrue("El mensaje AnomalyDetected debió ser enrutado.");
+        var isConsumedByBus = await _harness.Consumed.Any<AnomalyDetected>(
+            c => c.Context.Message.ResourceId == anomalyEvent.ResourceId);
+        isConsumedByBus.Should().BeTrue("El mensaje AnomalyDetected debió ser enrutado por URN.");
 
         var consumerHarness = _harness.GetConsumerHarness<AnomalyEventConsumer>();
-        var isConsumedByHandler = await consumerHarness.Consumed.Any<AnomalyDetected>();
+        var isConsumedByHandler = await consumerHarness.Consumed.Any<AnomalyDetected>(
+            c => c.Context.Message.ResourceId == anomalyEvent.ResourceId);
         isConsumedByHandler.Should().BeTrue("El AnomalyEventConsumer debió procesar el mensaje sin excepciones.");
 
-        // Aserción de Persistencia
         using var scope = _provider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
-        var tasksInDb = await dbContext.ResolutionTasks.ToListAsync();
-        tasksInDb.Should().NotBeEmpty("El handler de MediatR debió persistir en PostgreSQL (InMemory).");
+        var saved = await dbContext.ResolutionTasks
+            .FirstOrDefaultAsync(t => t.TenantId == anomalyEvent.TenantId && t.Anomaly.ResourceId == anomalyEvent.ResourceId);
+        saved.Should().NotBeNull("El handler de MediatR debió persistir en la base de datos.");
     }
-    
-    public class FakeCognitiveOrchestrator : Application.Interfaces.ICognitiveOrchestrator
+
+    [Fact]
+    public async Task Should_Deduplicate_RedeliveredAnomalyDetected_ByTenantResourceAndType()
+    {
+        var tenantId = Guid.NewGuid();
+        var resourceId = Guid.NewGuid();
+        var anomaly = new AnomalyDetected(
+            TenantId: tenantId,
+            CorrelationId: Guid.NewGuid(),
+            AnomalyType: "AppointmentNoShowRisk",
+            ResourceId: resourceId,
+            RiskProbability: 0.92m,
+            Attributes: new Dictionary<string, string>());
+
+        await _harness.Bus.Publish(anomaly);
+        (await _harness.Consumed.Any<AnomalyDetected>(c => c.Context.Message.ResourceId == resourceId)).Should().BeTrue();
+
+        // Segundo envío simulando redelivery de RabbitMQ
+        await _harness.Bus.Publish(anomaly with { CorrelationId = Guid.NewGuid() });
+        var consumerHarness = _harness.GetConsumerHarness<AnomalyEventConsumer>();
+        var consumedMessages = await consumerHarness.Consumed.SelectAsync<AnomalyDetected>(
+            c => c.Context.Message.ResourceId == resourceId).ToListAsync();
+        consumedMessages.Should().HaveCount(2);
+
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var tasks = await dbContext.ResolutionTasks
+            .Where(t => t.TenantId == tenantId && t.Anomaly.ResourceId == resourceId)
+            .ToListAsync();
+
+        tasks.Should().HaveCount(1);
+        _webhookMock.Verify(w => w.DispatchAsync(
+            "https://medcare.test/api/appointments/overbook",
+            Moq.It.IsAny<Dictionary<string, object>>(),
+            Moq.It.IsAny<CancellationToken>(),
+            $"{tasks[0].Id}:0"), Moq.Times.Once);
+    }
+
+    [Fact]
+    public async Task Should_Consume_ResolutionApproved_And_DispatchDeferredActionsWithIdempotencyKey()
+    {
+        var taskId = Guid.NewGuid();
+        var resourceId = Guid.NewGuid();
+        var approvedEvent = new ResolutionApproved(
+            TenantId: Guid.NewGuid(),
+            CorrelationId: Guid.NewGuid(),
+            ResolutionTaskId: taskId,
+            ResourceId: resourceId,
+            AiPlanJson: """
+                        {
+                          "DeferredActions": [
+                            {
+                              "Endpoint": "https://medcare.test/api/appointments/monitor",
+                              "Payload": { "resourceId": "abc", "requiresAction": true }
+                            }
+                          ]
+                        }
+                        """);
+
+        await _harness.Bus.Publish(approvedEvent);
+
+        var consumerHarness = _harness.GetConsumerHarness<ResolutionApprovedConsumer>();
+        var consumed = await consumerHarness.Consumed.Any<ResolutionApproved>(
+            c => c.Context.Message.ResolutionTaskId == taskId);
+        consumed.Should().BeTrue();
+
+        _webhookMock.Verify(w => w.DispatchAsync(
+            "https://medcare.test/api/appointments/monitor",
+            Moq.It.IsAny<Dictionary<string, object>>(),
+            Moq.It.IsAny<CancellationToken>(),
+            $"{taskId}:deferred:0"), Moq.Times.Once);
+    }
+
+    public class FakeCognitiveOrchestrator : ICognitiveOrchestrator
     {
         public Task<(CognitivePlan Plan, int PromptTokens, int CompletionTokens)> ProposeResolutionAsync(
-            AnomalyEvent anomaly, 
-            string tenantPromptContext, 
+            AnomalyEvent anomaly,
+            string tenantPromptContext,
             CancellationToken cancellationToken = default)
         {
-            // Simulamos lo que Groq habría respondido en menos de 1 milisegundo
+            var actions = anomaly.RiskProbability >= 0.90m
+                ? new List<ProposedAction>
+                {
+                    new(
+                        "GENERATE_OVERBOOK",
+                        "https://medcare.test/api/appointments/overbook",
+                        new Dictionary<string, object> { ["resourceId"] = anomaly.ResourceId })
+                }
+                : new List<ProposedAction>();
+
             var dummyPlan = new CognitivePlan(
                 Title: "Acción Simulada",
                 Reasoning: "Porque es un test automatizado",
                 ConfidenceScore: 0.99m,
-                ProposedActions: new List<ProposedAction>()
+                ProposedActions: actions
             );
 
-            return Task.FromResult((dummyPlan, 15, 25)); // Simulamos gasto de tokens
+            return Task.FromResult((dummyPlan, 15, 25));
         }
     }
 
@@ -175,11 +257,16 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             Microsoft.Extensions.Logging.Abstractions.NullLogger<Omro.Infrastructure.HttpClients.WebhookDispatcher>.Instance,
             tokenService);
 
-        await dispatcher.DispatchAsync("https://medcare.test/api/appointments/overbook", new Dictionary<string, object> { ["ok"] = true }, CancellationToken.None);
+        await dispatcher.DispatchAsync(
+            "https://medcare.test/api/appointments/overbook",
+            new Dictionary<string, object> { ["ok"] = true },
+            CancellationToken.None,
+            "task-1:0");
 
         captureHandler.LastRequest.Should().NotBeNull();
-        captureHandler.LastRequest!.Headers.Authorization.Should().NotBeNull();
-        captureHandler.LastRequest!.Headers.Authorization!.Scheme.Should().Be("Bearer");
+        captureHandler.LastRequest!.Headers.GetValues("Idempotency-Key").Should().ContainSingle("task-1:0");
+        captureHandler.LastRequest.Headers.Authorization.Should().NotBeNull();
+        captureHandler.LastRequest.Headers.Authorization!.Scheme.Should().Be("Bearer");
 
         var jwt = captureHandler.LastRequest.Headers.Authorization.Parameter!;
         var validationHandler = new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler { MapInboundClaims = false };
