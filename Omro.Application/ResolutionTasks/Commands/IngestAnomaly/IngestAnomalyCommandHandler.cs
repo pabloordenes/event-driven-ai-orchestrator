@@ -26,6 +26,18 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
     
     public async Task<Guid> Handle(IngestAnomalyCommand request, CancellationToken cancellationToken)
     {
+        var existingTask = await _repository.GetByKeyAsync(
+            request.TenantId,
+            request.ResourceId,
+            request.AnomalyType,
+            cancellationToken);
+
+        if (existingTask != null)
+        {
+            Console.WriteLine($"[OMRO IDEMPOTENCIA] Anomalía duplicada ({request.TenantId}, {request.ResourceId}, {request.AnomalyType}). Retornando tarea existente {existingTask.Id}.");
+            return existingTask.Id;
+        }
+
         // rehidratacion 
         var anomalyEvent = new AnomalyEvent(
             RiskProbability: request.RiskProbability,
@@ -87,14 +99,16 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
             return resolutionTask.Id;
         }
 
-        foreach (var action in plan.ProposedActions)
+        for (int i = 0; i < plan.ProposedActions.Count; i++)
         {
+            var action = plan.ProposedActions[i];
             if (!string.IsNullOrWhiteSpace(action.Endpoint))
             {
                 try
                 {
-                    // Disparo 100% ciego con la URL que indicó el LLM
-                    await _webhookDispatcher.DispatchAsync(action.Endpoint, action.Payload, cancellationToken);
+                    var idempotencyKey = $"{resolutionTask.Id}:{i}";
+                    // Disparo 100% ciego con la URL que indicó el LLM + clave idempotente
+                    await _webhookDispatcher.DispatchAsync(action.Endpoint, action.Payload, cancellationToken, idempotencyKey);
                 }
                 catch (Exception ex)
                 {

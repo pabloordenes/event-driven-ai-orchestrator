@@ -21,7 +21,11 @@ public class WebhookDispatcher : IWebhookDispatcher
         _tokenService = tokenService;
     }
 
-    public async Task DispatchAsync(string endpoint, Dictionary<string, object> payload, CancellationToken cancellationToken)
+    public async Task DispatchAsync(
+        string endpoint,
+        Dictionary<string, object> payload,
+        CancellationToken cancellationToken,
+        string? idempotencyKey = null)
     {
         _logger.LogInformation("OMRO disparando Webhook dinámico hacia: {Endpoint}", endpoint);
 
@@ -29,6 +33,11 @@ public class WebhookDispatcher : IWebhookDispatcher
         {
             Content = JsonContent.Create(payload)
         };
+
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            request.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
+        }
 
         if (_tokenService != null)
         {
