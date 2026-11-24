@@ -1,7 +1,12 @@
+using System.Security.Cryptography;
+using System.Text;
 using MassTransit;
+using Omro.Api.Services;
 using Omro.Contracts.Events;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddScoped<IOmroQueueAdminService, OmroRabbitMqQueueAdminService>();
 
 // MassTransit únicamente como publicador para endpoints de diagnóstico en Development
 builder.Services.AddMassTransit(x =>
@@ -53,6 +58,60 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+
+var adminGroup = app.MapGroup("/api/admin/queues")
+    .AddEndpointFilter(async (ctx, next) =>
+    {
+        var configuredKey = ctx.HttpContext.RequestServices
+            .GetRequiredService<IConfiguration>()["AdminAuth:ApiKey"];
+
+        if (string.IsNullOrWhiteSpace(configuredKey))
+        {
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
+
+        if (!ctx.HttpContext.Request.Headers.TryGetValue("X-Admin-Api-Key", out var providedValues))
+        {
+            return Results.Unauthorized();
+        }
+
+        var expectedBytes = Encoding.UTF8.GetBytes(configuredKey);
+        var actualBytes = Encoding.UTF8.GetBytes(providedValues.ToString().Trim());
+        if (expectedBytes.Length != actualBytes.Length ||
+            !CryptographicOperations.FixedTimeEquals(expectedBytes, actualBytes))
+        {
+            return Results.Unauthorized();
+        }
+
+        return await next(ctx);
+    });
+
+adminGroup.MapGet("/errors", async (IOmroQueueAdminService adminService, CancellationToken ct) =>
+{
+    var summaries = await adminService.GetErrorQueueSummariesAsync(ct);
+    return Results.Ok(summaries);
+});
+
+adminGroup.MapPost("/{queueName}/requeue", async (
+    string queueName,
+    int? maxMessages,
+    IOmroQueueAdminService adminService,
+    CancellationToken ct) =>
+{
+    var limit = maxMessages ?? 50;
+    if (limit is < 1 or > 500)
+        return Results.BadRequest(new { message = "maxMessages debe estar entre 1 y 500." });
+
+    try
+    {
+        var result = await adminService.RequeueErrorMessagesAsync(queueName, limit, ct);
+        return Results.Ok(result);
+    }
+    catch (ArgumentException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message, allowedQueues = adminService.AllowedQueues });
+    }
+});
 
 app.MapGet("/health", () => Results.Ok("OMRO Orchestrator is running"));
 

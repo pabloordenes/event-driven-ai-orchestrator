@@ -1,4 +1,7 @@
-﻿using MediatR;
+﻿using System.Text.Json;
+using MediatR;
+using Microsoft.Extensions.Logging;
+using Omro.Application.Common.Exceptions;
 using Omro.Application.Interfaces;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
@@ -8,22 +11,28 @@ namespace Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand, Guid>
 {
     private readonly IResolutionTaskRepository _repository;
+    private readonly IActionExecutionRepository _actionExecutionRepository;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICognitiveOrchestrator _orchestrator;
     private readonly IWebhookDispatcher _webhookDispatcher;
+    private readonly ILogger<IngestAnomalyCommandHandler> _logger;
 
     public IngestAnomalyCommandHandler(
-        IResolutionTaskRepository repository, 
+        IResolutionTaskRepository repository,
+        IActionExecutionRepository actionExecutionRepository,
         IUnitOfWork unitOfWork,
         ICognitiveOrchestrator orchestrator,
-        IWebhookDispatcher webhookDispatcher)
+        IWebhookDispatcher webhookDispatcher,
+        ILogger<IngestAnomalyCommandHandler> logger)
     {
         _repository = repository;
+        _actionExecutionRepository = actionExecutionRepository;
         _unitOfWork = unitOfWork;
         _orchestrator = orchestrator;
         _webhookDispatcher = webhookDispatcher;
+        _logger = logger;
     }
-    
+
     public async Task<Guid> Handle(IngestAnomalyCommand request, CancellationToken cancellationToken)
     {
         var existingTask = await _repository.GetByKeyAsync(
@@ -34,7 +43,32 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
 
         if (existingTask != null)
         {
-            Console.WriteLine($"[OMRO IDEMPOTENCIA] Anomalía duplicada ({request.TenantId}, {request.ResourceId}, {request.AnomalyType}). Retornando tarea existente {existingTask.Id}.");
+            var existingExecutions = await _actionExecutionRepository.GetByTaskAndPhaseAsync(
+                existingTask.Id,
+                ActionExecutionPhase.Immediate,
+                cancellationToken);
+
+            var pendingRetryExecutions = existingExecutions
+                .Where(e => e.Status is not ActionExecutionStatus.Succeeded and not ActionExecutionStatus.FailedPermanent)
+                .ToList();
+
+            if (pendingRetryExecutions.Count > 0)
+            {
+                _logger.LogInformation(
+                    "[OMRO RECOVERY] Reanudando {Count} acción(es) inmediata(s) pendiente(s) para tarea existente {TaskId}.",
+                    pendingRetryExecutions.Count,
+                    existingTask.Id);
+
+                await ExecutePendingActionsAsync(existingTask.Id, pendingRetryExecutions, cancellationToken);
+                return existingTask.Id;
+            }
+
+            _logger.LogInformation(
+                "[OMRO IDEMPOTENCIA] Anomalía duplicada ({TenantId}, {ResourceId}, {AnomalyType}). Retornando tarea existente {TaskId}.",
+                request.TenantId,
+                request.ResourceId,
+                request.AnomalyType,
+                existingTask.Id);
             return existingTask.Id;
         }
 
@@ -44,9 +78,9 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
             ResourceId: request.ResourceId,
             AnomalyType: request.AnomalyType,
             CorrelationId: request.CorrelationId);
-        
+
         var resolutionTask = new ResolutionTask(request.TenantId, anomalyEvent);
-        
+
         // mutación de dominio
         resolutionTask.StartAnalysis();
 
@@ -71,16 +105,20 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                                      - Payload: Debe incluir "resourceId", "riskProbability": <el valor del riesgo>, y "aiPlanJson" que contenga un string JSON escapado con la siguiente estructura de Acción Diferida:
                                        { "DeferredActions": [ { "Endpoint": "https://medcare-cqrs-clinical-api.onrender.com/api/appointments/monitor", "Payload": { "resourceId": "<id>", "requiresAction": true } } ] }
                                      """;
-        
+
         // razonamiento cognitivo: el modelo asume el control
         var (plan, promptTokens, completionTokens) = await _orchestrator.ProposeResolutionAsync(
             anomalyEvent,
             tenantPromptContext,
             cancellationToken);
-        
-        Console.WriteLine($"\n[MEDCAREOS DECISIÓN CLÍNICA]\n{System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true })}\n");
-        
-        // mutacion de dominio final: empaquetamos el JSON y los costos o escalamos a revisión humana
+
+        _logger.LogInformation(
+            "Decisión cognitiva generada para recurso {ResourceId}. Title={Title}, IsFallback={IsFallback}, Actions={ActionCount}",
+            request.ResourceId,
+            plan.Title,
+            plan.IsFallback,
+            plan.ProposedActions?.Count ?? 0);
+
         if (plan.IsFallback)
         {
             resolutionTask.MarkNeedsHumanReview(plan.Reasoning, plan);
@@ -90,33 +128,97 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
             resolutionTask.ProposePlan(plan, promptTokens, completionTokens);
         }
 
-        // persistencia
+        var executions = new List<ActionExecution>();
+        if (!plan.IsFallback && plan.ProposedActions is { Count: > 0 })
+        {
+            for (int i = 0; i < plan.ProposedActions.Count; i++)
+            {
+                var action = plan.ProposedActions[i];
+                if (string.IsNullOrWhiteSpace(action.Endpoint))
+                    continue;
+
+                var payloadJson = JsonSerializer.Serialize(action.Payload ?? new Dictionary<string, object>());
+                executions.Add(ActionExecution.CreatePending(
+                    resolutionTask.Id,
+                    ActionExecutionPhase.Immediate,
+                    i,
+                    action.ActionType,
+                    action.Endpoint,
+                    payloadJson,
+                    $"{resolutionTask.Id}:{i}"));
+            }
+        }
+
+        // Transacción 1: persistir intención ANTES de despachar webhooks
         _repository.Add(resolutionTask);
+        if (executions.Count > 0)
+        {
+            _actionExecutionRepository.AddRange(executions);
+        }
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-        if (plan.IsFallback || plan.ProposedActions == null || plan.ProposedActions.Count == 0)
+        if (executions.Count == 0)
         {
             return resolutionTask.Id;
         }
 
-        for (int i = 0; i < plan.ProposedActions.Count; i++)
-        {
-            var action = plan.ProposedActions[i];
-            if (!string.IsNullOrWhiteSpace(action.Endpoint))
-            {
-                try
-                {
-                    var idempotencyKey = $"{resolutionTask.Id}:{i}";
-                    // Disparo 100% ciego con la URL que indicó el LLM + clave idempotente
-                    await _webhookDispatcher.DispatchAsync(action.Endpoint, action.Payload, cancellationToken, idempotencyKey);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[ERROR WEBHOOK] Falló la entrega hacia {action.Endpoint}: {ex.Message}");
-                }
-            }
-        }
+        await ExecutePendingActionsAsync(resolutionTask.Id, executions, cancellationToken);
 
         return resolutionTask.Id;
+    }
+
+    private async Task ExecutePendingActionsAsync(
+        Guid taskId,
+        List<ActionExecution> executions,
+        CancellationToken cancellationToken)
+    {
+        string? transientError = null;
+        int? transientStatus = null;
+
+        foreach (var execution in executions)
+        {
+            execution.MarkInProgress();
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+            var payload = JsonSerializer.Deserialize<Dictionary<string, object>>(execution.PayloadJson)
+                          ?? new Dictionary<string, object>();
+
+            var result = await _webhookDispatcher.DispatchAsync(
+                execution.Endpoint,
+                payload,
+                cancellationToken,
+                execution.IdempotencyKey,
+                taskId);
+
+            if (result.IsSuccess)
+            {
+                execution.MarkSucceeded(result.HttpStatusCode, result.Attempts, result.ExecutedAtUtc);
+            }
+            else if (result.IsPermanentFailure)
+            {
+                execution.MarkFailedPermanent(
+                    result.HttpStatusCode,
+                    result.Attempts,
+                    result.ErrorMessage,
+                    result.ExecutedAtUtc);
+            }
+            else
+            {
+                execution.MarkFailedTransient(
+                    result.HttpStatusCode,
+                    result.Attempts,
+                    result.ErrorMessage,
+                    result.ExecutedAtUtc);
+                transientError ??= result.ErrorMessage ?? "Error transitorio en despacho de webhook.";
+                transientStatus ??= result.HttpStatusCode;
+            }
+
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        if (transientError is not null)
+        {
+            throw new TransientWebhookDispatchException(transientError, transientStatus);
+        }
     }
 }

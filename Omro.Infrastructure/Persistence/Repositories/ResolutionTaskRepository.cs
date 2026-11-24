@@ -18,6 +18,12 @@ public class ResolutionTaskRepository : IResolutionTaskRepository
         _dbContext.ResolutionTasks.Add(task);
     }
 
+    public async Task<ResolutionTask?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        return await _dbContext.ResolutionTasks
+            .FirstOrDefaultAsync(t => t.Id == id, cancellationToken);
+    }
+
     public async Task<ResolutionTask?> GetByKeyAsync(
         Guid tenantId,
         Guid resourceId,
