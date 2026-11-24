@@ -8,6 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Moq;
 using Omro.Application.Interfaces;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
+using Omro.Application.ResolutionTasks.Services;
 using Omro.Contracts.Events;
 using Omro.Domain.Messaging;
 using Omro.Domain.Repositories;
@@ -186,6 +187,7 @@ public class WebhookDispatcherResilienceTests
             o.UseInMemoryDatabase(dbName).UseInternalServiceProvider(inMemoryProvider));
         services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
         services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
+        services.AddScoped<IActionExecutionCoordinator, ActionExecutionCoordinator>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
         services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
 

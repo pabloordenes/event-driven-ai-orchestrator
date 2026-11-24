@@ -63,7 +63,6 @@ namespace Omro.Infrastructure.Migrations
             modelBuilder.Entity("Omro.Domain.ResolutionTasks.ActionExecution", b =>
                 {
                     b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
                     b.Property<int>("ActionIndex")
@@ -155,6 +154,21 @@ namespace Omro.Infrastructure.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<bool>("ExpectsExternalApproval")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("expects_external_approval");
+
+                    b.Property<string>("FailureReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("failure_reason");
+
+                    b.Property<DateTime?>("ResolvedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("resolved_at");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasColumnType("text");
@@ -174,7 +188,7 @@ namespace Omro.Infrastructure.Migrations
             modelBuilder.Entity("Omro.Domain.ResolutionTasks.ActionExecution", b =>
                 {
                     b.HasOne("Omro.Domain.ResolutionTasks.ResolutionTask", null)
-                        .WithMany()
+                        .WithMany("ActionExecutions")
                         .HasForeignKey("ResolutionTaskId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
@@ -271,6 +285,11 @@ namespace Omro.Infrastructure.Migrations
                         .IsRequired();
 
                     b.Navigation("ReasoningTraces");
+                });
+
+            modelBuilder.Entity("Omro.Domain.ResolutionTasks.ResolutionTask", b =>
+                {
+                    b.Navigation("ActionExecutions");
                 });
 #pragma warning restore 612, 618
         }

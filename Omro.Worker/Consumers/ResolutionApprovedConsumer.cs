@@ -3,6 +3,7 @@ using MassTransit;
 using Microsoft.Extensions.Logging;
 using Omro.Application.Common.Exceptions;
 using Omro.Application.Interfaces;
+using Omro.Application.ResolutionTasks.Services;
 using Omro.Contracts.Events;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
@@ -15,6 +16,7 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
     private readonly IResolutionTaskRepository _taskRepository;
     private readonly IActionExecutionRepository _actionExecutionRepository;
     private readonly IUnitOfWork _unitOfWork;
+    private readonly IActionExecutionCoordinator _coordinator;
     private readonly ILogger<ResolutionApprovedConsumer> _logger;
 
     public ResolutionApprovedConsumer(
@@ -22,12 +24,14 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
         IResolutionTaskRepository taskRepository,
         IActionExecutionRepository actionExecutionRepository,
         IUnitOfWork unitOfWork,
+        IActionExecutionCoordinator coordinator,
         ILogger<ResolutionApprovedConsumer> logger)
     {
         _webhookDispatcher = webhookDispatcher;
         _taskRepository = taskRepository;
         _actionExecutionRepository = actionExecutionRepository;
         _unitOfWork = unitOfWork;
+        _coordinator = coordinator;
         _logger = logger;
     }
 
@@ -37,12 +41,57 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
         var cancellationToken = context.CancellationToken;
 
         _logger.LogInformation(
-            "OMRO: Aprobación HITL recibida para tarea {TaskId}. Buscando acciones diferidas...",
-            message.ResolutionTaskId);
+            "OMRO: Aprobación HITL recibida para tarea {TaskId}, recurso {ResourceId}. Buscando acciones diferidas...",
+            message.ResolutionTaskId,
+            message.ResourceId);
 
         var plan = JsonSerializer.Deserialize<DeferredPlanDto>(
             message.AiPlanJson,
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        var existingTask = await _taskRepository.GetByIdAsync(message.ResolutionTaskId, cancellationToken)
+                           ?? await _taskRepository.GetLatestByTenantAndResourceAsync(
+                               message.TenantId,
+                               message.ResourceId,
+                               cancellationToken);
+
+        if (existingTask is not null)
+        {
+            if (existingTask.Status is ResolutionStatus.Resolved or ResolutionStatus.Failed)
+            {
+                _logger.LogInformation(
+                    "OMRO: ResolutionTask {TaskId} ya está en estado terminal {Status}. Se ignora aprobación duplicada.",
+                    existingTask.Id,
+                    existingTask.Status);
+                return;
+            }
+
+            if (plan?.DeferredActions is null || plan.DeferredActions.Count == 0)
+            {
+                _logger.LogWarning(
+                    "OMRO: Aprobación sin DeferredActions para tarea {TaskId}. Marcando Resolved.",
+                    existingTask.Id);
+                existingTask.Resolve("Aprobación externa recibida sin acciones diferidas pendientes.");
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+                return;
+            }
+
+            var deferredSpecs = plan.DeferredActions.Select((action, index) => (
+                action.Endpoint,
+                JsonSerializer.Serialize(action.Payload ?? new Dictionary<string, object>()),
+                $"{message.ResolutionTaskId}:deferred:{index}"
+            ));
+
+            var addedExecutions = existingTask.RegisterDeferredActions(deferredSpecs);
+            if (addedExecutions.Count > 0)
+            {
+                _actionExecutionRepository.AddRange(addedExecutions);
+                await _unitOfWork.SaveChangesAsync(cancellationToken);
+            }
+
+            await _coordinator.ExecutePhaseAsync(existingTask, ActionExecutionPhase.Deferred, cancellationToken);
+            return;
+        }
 
         if (plan?.DeferredActions is null || plan.DeferredActions.Count == 0)
         {
@@ -52,93 +101,7 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
             return;
         }
 
-        var existingTask = await _taskRepository.GetByIdAsync(message.ResolutionTaskId, cancellationToken);
-        if (existingTask is not null)
-        {
-            var existingDeferred = await _actionExecutionRepository.GetByTaskAndPhaseAsync(
-                existingTask.Id,
-                ActionExecutionPhase.Deferred,
-                cancellationToken);
-
-            if (existingDeferred.Count == 0)
-            {
-                for (int i = 0; i < plan.DeferredActions.Count; i++)
-                {
-                    var action = plan.DeferredActions[i];
-                    if (string.IsNullOrWhiteSpace(action.Endpoint))
-                        continue;
-
-                    var payloadJson = JsonSerializer.Serialize(action.Payload ?? new Dictionary<string, object>());
-                    existingDeferred.Add(ActionExecution.CreatePending(
-                        existingTask.Id,
-                        ActionExecutionPhase.Deferred,
-                        i,
-                        "DEFERRED_WEBHOOK",
-                        action.Endpoint,
-                        payloadJson,
-                        $"{message.ResolutionTaskId}:deferred:{i}"));
-                }
-
-                if (existingDeferred.Count > 0)
-                {
-                    _actionExecutionRepository.AddRange(existingDeferred);
-                    await _unitOfWork.SaveChangesAsync(cancellationToken);
-                }
-            }
-
-            var toDispatch = existingDeferred
-                .Where(e => e.Status is not ActionExecutionStatus.Succeeded and not ActionExecutionStatus.FailedPermanent)
-                .ToList();
-
-            string? transientErr = null;
-            int? transientStatus = null;
-
-            foreach (var execution in toDispatch)
-            {
-                execution.MarkInProgress();
-                await _unitOfWork.SaveChangesAsync(cancellationToken);
-
-                var payload = JsonSerializer.Deserialize<Dictionary<string, object>>(execution.PayloadJson)
-                              ?? new Dictionary<string, object>();
-
-                var result = await _webhookDispatcher.DispatchAsync(
-                    execution.Endpoint,
-                    payload,
-                    cancellationToken,
-                    execution.IdempotencyKey,
-                    existingTask.Id);
-
-                if (result.IsSuccess)
-                {
-                    execution.MarkSucceeded(result.HttpStatusCode, result.Attempts, result.ExecutedAtUtc);
-                }
-                else if (result.IsPermanentFailure)
-                {
-                    execution.MarkFailedPermanent(result.HttpStatusCode, result.Attempts, result.ErrorMessage, result.ExecutedAtUtc);
-                    await _unitOfWork.SaveChangesAsync(cancellationToken);
-                    throw new PermanentWebhookException(
-                        result.ErrorMessage ?? $"Error permanente en webhook diferido {execution.Endpoint}",
-                        result.HttpStatusCode);
-                }
-                else
-                {
-                    execution.MarkFailedTransient(result.HttpStatusCode, result.Attempts, result.ErrorMessage, result.ExecutedAtUtc);
-                    transientErr ??= result.ErrorMessage;
-                    transientStatus ??= result.HttpStatusCode;
-                }
-
-                await _unitOfWork.SaveChangesAsync(cancellationToken);
-            }
-
-            if (transientErr is not null)
-            {
-                throw new TransientWebhookDispatchException(transientErr, transientStatus);
-            }
-
-            return;
-        }
-
-        // Fallback cuando el ResolutionApproved no tiene tarea vinculada por Id en OMRO (p.ej. tests aislados o ID externo)
+        // Fallback cuando el ResolutionApproved no tiene tarea vinculada en OMRO
         for (int i = 0; i < plan.DeferredActions.Count; i++)
         {
             var action = plan.DeferredActions[i];

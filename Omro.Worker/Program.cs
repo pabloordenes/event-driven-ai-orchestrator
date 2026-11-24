@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Omro.Application.Interfaces;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
+using Omro.Application.ResolutionTasks.Services;
 using Omro.Domain.Repositories;
 using Omro.Infrastructure.CognitiveServices.Agents;
 using Omro.Infrastructure.Configuration;
@@ -35,6 +36,8 @@ builder.Services.Configure<OmroServiceAuthOptions>(
     builder.Configuration.GetSection(OmroServiceAuthOptions.SectionName));
 builder.Services.Configure<RabbitMqMessagingOptions>(
     builder.Configuration.GetSection(RabbitMqMessagingOptions.SectionName));
+builder.Services.Configure<WebhookExecutionOptions>(
+    builder.Configuration.GetSection(WebhookExecutionOptions.SectionName));
 
 var rabbitOptions = builder.Configuration
     .GetSection(RabbitMqMessagingOptions.SectionName)
@@ -46,6 +49,7 @@ builder.Services.AddSingleton<DeadLetterAlertObserver>();
 
 builder.Services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
 builder.Services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
+builder.Services.AddScoped<IActionExecutionCoordinator, ActionExecutionCoordinator>();
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
 
