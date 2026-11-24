@@ -23,6 +23,129 @@ namespace Omro.Infrastructure.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("Omro.Domain.Messaging.ProcessedMessage", b =>
+                {
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("message_id");
+
+                    b.Property<string>("ConsumerName")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("consumer_name");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<DateTimeOffset?>("ProcessedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("processed_at");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("status");
+
+                    b.HasKey("MessageId", "ConsumerName");
+
+                    b.HasIndex("ExpiresAt")
+                        .HasDatabaseName("IX_PROCESSED_MESSAGE_expires_at");
+
+                    b.ToTable("PROCESSED_MESSAGE", "omro");
+                });
+
+            modelBuilder.Entity("Omro.Domain.ResolutionTasks.ActionExecution", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("ActionIndex")
+                        .HasColumnType("integer")
+                        .HasColumnName("action_index");
+
+                    b.Property<string>("ActionType")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("action_type");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer")
+                        .HasColumnName("attempts");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Endpoint")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("endpoint");
+
+                    b.Property<string>("Error")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("error");
+
+                    b.Property<DateTime?>("ExecutedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("executed_at");
+
+                    b.Property<int?>("HttpStatus")
+                        .HasColumnType("integer")
+                        .HasColumnName("http_status");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("idempotency_key");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("payload_json");
+
+                    b.Property<string>("Phase")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("phase");
+
+                    b.Property<Guid>("ResolutionTaskId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("resolution_task_id");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("status");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Status")
+                        .HasDatabaseName("IX_ACTION_EXECUTION_status");
+
+                    b.HasIndex("ResolutionTaskId", "Phase", "ActionIndex")
+                        .IsUnique()
+                        .HasDatabaseName("IX_ACTION_EXECUTION_task_phase_index");
+
+                    b.ToTable("ACTION_EXECUTION", "omro");
+                });
+
             modelBuilder.Entity("Omro.Domain.ResolutionTasks.ResolutionTask", b =>
                 {
                     b.Property<Guid>("Id")
@@ -46,6 +169,15 @@ namespace Omro.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("RESOLUTION_TASK", "omro");
+                });
+
+            modelBuilder.Entity("Omro.Domain.ResolutionTasks.ActionExecution", b =>
+                {
+                    b.HasOne("Omro.Domain.ResolutionTasks.ResolutionTask", null)
+                        .WithMany()
+                        .HasForeignKey("ResolutionTaskId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Omro.Domain.ResolutionTasks.ResolutionTask", b =>
