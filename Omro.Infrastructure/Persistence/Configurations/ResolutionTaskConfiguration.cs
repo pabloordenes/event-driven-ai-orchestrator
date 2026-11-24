@@ -21,8 +21,20 @@ public class ResolutionTaskConfiguration : IEntityTypeConfiguration<ResolutionTa
             .HasConversion<string>()
             .IsRequired();
         
+        builder.Property(t => t.ExpectsExternalApproval)
+            .HasColumnName("expects_external_approval")
+            .HasDefaultValue(false)
+            .IsRequired();
+
         builder.Property(t => t.CreatedAt).IsRequired();
         builder.Property(t => t.UpdatedAt).IsRequired();
+
+        builder.Property(t => t.ResolvedAt)
+            .HasColumnName("resolved_at");
+
+        builder.Property(t => t.FailureReason)
+            .HasColumnName("failure_reason")
+            .HasMaxLength(1000);
         
         // patron value object
         builder.OwnsOne(t => t.Anomaly, a =>
@@ -67,6 +79,9 @@ public class ResolutionTaskConfiguration : IEntityTypeConfiguration<ResolutionTa
         });
 
         builder.Metadata.FindNavigation(nameof(ResolutionTask.ReasoningTraces))!
+            .SetPropertyAccessMode(PropertyAccessMode.Field);
+
+        builder.Metadata.FindNavigation(nameof(ResolutionTask.ActionExecutions))!
             .SetPropertyAccessMode(PropertyAccessMode.Field);
     }
 }

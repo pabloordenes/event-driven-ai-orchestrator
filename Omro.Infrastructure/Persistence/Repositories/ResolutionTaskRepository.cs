@@ -21,6 +21,7 @@ public class ResolutionTaskRepository : IResolutionTaskRepository
     public async Task<ResolutionTask?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
     {
         return await _dbContext.ResolutionTasks
+            .Include(t => t.ActionExecutions)
             .FirstOrDefaultAsync(t => t.Id == id, cancellationToken);
     }
 
@@ -31,10 +32,27 @@ public class ResolutionTaskRepository : IResolutionTaskRepository
         CancellationToken cancellationToken = default)
     {
         return await _dbContext.ResolutionTasks
+            .Include(t => t.ActionExecutions)
             .FirstOrDefaultAsync(
                 t => t.TenantId == tenantId &&
                      t.Anomaly.ResourceId == resourceId &&
                      t.Anomaly.AnomalyType == anomalyType,
                 cancellationToken);
+    }
+
+    public async Task<ResolutionTask?> GetLatestByTenantAndResourceAsync(
+        Guid tenantId,
+        Guid resourceId,
+        CancellationToken cancellationToken = default)
+    {
+        return await _dbContext.ResolutionTasks
+            .Include(t => t.ActionExecutions)
+            .Where(t => t.TenantId == tenantId && t.Anomaly.ResourceId == resourceId)
+            .OrderByDescending(t =>
+                t.Status == ResolutionStatus.WaitingForExternalData ||
+                t.Status == ResolutionStatus.ActionProposed ||
+                t.Status == ResolutionStatus.NeedsHumanReview)
+            .ThenByDescending(t => t.CreatedAt)
+            .FirstOrDefaultAsync(cancellationToken);
     }
 }

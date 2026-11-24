@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Omro.Application.Interfaces;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
+using Omro.Application.ResolutionTasks.Services;
 using Omro.Contracts.Events;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
@@ -34,6 +35,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
 
         services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
         services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
+        services.AddScoped<IActionExecutionCoordinator, ActionExecutionCoordinator>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
         services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
 
@@ -231,8 +233,11 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
 
         await using var db = new ApplicationDbContext(dbOptions);
         var repo = new ResolutionTaskRepository(db);
-        var actionRepo = new ActionExecutionRepository(db);
         var uow = new UnitOfWork(db);
+        var coordinator = new ActionExecutionCoordinator(
+            handlerMock.Object,
+            uow,
+            NullLogger<ActionExecutionCoordinator>.Instance);
 
         var failingHttpClient = new HttpClient(new FailingHttpMessageHandler())
         {
@@ -249,10 +254,9 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
 
         var cmdHandler = new IngestAnomalyCommandHandler(
             repo,
-            actionRepo,
             uow,
             orchestrator,
-            handlerMock.Object,
+            coordinator,
             NullLogger<IngestAnomalyCommandHandler>.Instance);
         var taskId = await cmdHandler.Handle(new IngestAnomalyCommand(Guid.NewGuid(), 0.91m, Guid.NewGuid()), CancellationToken.None);
 

@@ -11,6 +11,7 @@ public class ActionExecutionConfiguration : IEntityTypeConfiguration<ActionExecu
         builder.ToTable("ACTION_EXECUTION");
 
         builder.HasKey(x => x.Id);
+        builder.Property(x => x.Id).ValueGeneratedNever();
 
         builder.Property(x => x.ResolutionTaskId)
             .HasColumnName("resolution_task_id")
@@ -82,7 +83,7 @@ public class ActionExecutionConfiguration : IEntityTypeConfiguration<ActionExecu
             .HasDatabaseName("IX_ACTION_EXECUTION_status");
 
         builder.HasOne<ResolutionTask>()
-            .WithMany()
+            .WithMany(t => t.ActionExecutions)
             .HasForeignKey(x => x.ResolutionTaskId)
             .OnDelete(DeleteBehavior.Cascade);
     }

@@ -61,6 +61,7 @@ public class GroqCognitiveOrchestrator : ICognitiveOrchestrator
                             "Title": "Título corto y claro",
                             "Reasoning": "Justificación basada en las reglas del inquilino",
                             "ConfidenceScore": 0.95,
+                            "ExpectsExternalApproval": false,
                             "ProposedActions": [
                               {
                                 "ActionType": "TIPO_DE_ACCION",
@@ -69,6 +70,7 @@ public class GroqCognitiveOrchestrator : ICognitiveOrchestrator
                               }
                             ]
                           }
+                          Nota: establece "ExpectsExternalApproval": true únicamente si las reglas del inquilino indican que tras estas acciones iniciales se requiere aprobación externa/humana antes de ejecutar acciones diferidas.
                           """;
 
         try

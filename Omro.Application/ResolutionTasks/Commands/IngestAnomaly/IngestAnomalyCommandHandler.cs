@@ -1,8 +1,7 @@
-﻿using System.Text.Json;
-using MediatR;
+﻿using MediatR;
 using Microsoft.Extensions.Logging;
-using Omro.Application.Common.Exceptions;
 using Omro.Application.Interfaces;
+using Omro.Application.ResolutionTasks.Services;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
 
@@ -11,25 +10,22 @@ namespace Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand, Guid>
 {
     private readonly IResolutionTaskRepository _repository;
-    private readonly IActionExecutionRepository _actionExecutionRepository;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICognitiveOrchestrator _orchestrator;
-    private readonly IWebhookDispatcher _webhookDispatcher;
+    private readonly IActionExecutionCoordinator _coordinator;
     private readonly ILogger<IngestAnomalyCommandHandler> _logger;
 
     public IngestAnomalyCommandHandler(
         IResolutionTaskRepository repository,
-        IActionExecutionRepository actionExecutionRepository,
         IUnitOfWork unitOfWork,
         ICognitiveOrchestrator orchestrator,
-        IWebhookDispatcher webhookDispatcher,
+        IActionExecutionCoordinator coordinator,
         ILogger<IngestAnomalyCommandHandler> logger)
     {
         _repository = repository;
-        _actionExecutionRepository = actionExecutionRepository;
         _unitOfWork = unitOfWork;
         _orchestrator = orchestrator;
-        _webhookDispatcher = webhookDispatcher;
+        _coordinator = coordinator;
         _logger = logger;
     }
 
@@ -43,32 +39,23 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
 
         if (existingTask != null)
         {
-            var existingExecutions = await _actionExecutionRepository.GetByTaskAndPhaseAsync(
-                existingTask.Id,
-                ActionExecutionPhase.Immediate,
-                cancellationToken);
-
-            var pendingRetryExecutions = existingExecutions
-                .Where(e => e.Status is not ActionExecutionStatus.Succeeded and not ActionExecutionStatus.FailedPermanent)
-                .ToList();
-
-            if (pendingRetryExecutions.Count > 0)
+            if (existingTask.Status == ResolutionStatus.ActionProposed)
             {
                 _logger.LogInformation(
-                    "[OMRO RECOVERY] Reanudando {Count} acción(es) inmediata(s) pendiente(s) para tarea existente {TaskId}.",
-                    pendingRetryExecutions.Count,
+                    "[OMRO RECOVERY] Reanudando tarea existente {TaskId} en estado ActionProposed sin re-invocar al LLM.",
                     existingTask.Id);
 
-                await ExecutePendingActionsAsync(existingTask.Id, pendingRetryExecutions, cancellationToken);
+                await _coordinator.ExecutePhaseAsync(existingTask, ActionExecutionPhase.Immediate, cancellationToken);
                 return existingTask.Id;
             }
 
             _logger.LogInformation(
-                "[OMRO IDEMPOTENCIA] Anomalía duplicada ({TenantId}, {ResourceId}, {AnomalyType}). Retornando tarea existente {TaskId}.",
+                "[OMRO IDEMPOTENCIA] Anomalía duplicada ({TenantId}, {ResourceId}, {AnomalyType}). Retornando tarea existente {TaskId} en estado {Status}.",
                 request.TenantId,
                 request.ResourceId,
                 request.AnomalyType,
-                existingTask.Id);
+                existingTask.Id,
+                existingTask.Status);
             return existingTask.Id;
         }
 
@@ -93,6 +80,7 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                                      REGLAS DE NEGOCIO:
                                      1. RIESGO CRÍTICO (RiskProbability MAYOR o IGUAL a 0.85, es decir >= 0.85):
                                      - El paciente casi seguro faltará. Autoriza un sobrecupo automático.
+                                     - ExpectsExternalApproval: false
                                      - ActionType: "GENERATE_OVERBOOK"
                                      - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/appointments/overbook"
                                      - Payload: Debe incluir "resourceId", "targetRisk": <el valor del riesgo>, y "autoApprove": true.
@@ -100,6 +88,7 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                                      2. RIESGO MODERADO (RiskProbability MAYOR o IGUAL a 0.50 y MENOR a 0.85, es decir >= 0.50 y < 0.85):
                                      - Riesgo de choque de agenda. NO automatices el sobrecupo.
                                      - Envía una propuesta para que el administrador humano revise el caso (HITL).
+                                     - ExpectsExternalApproval: true
                                      - ActionType: "PROPOSE_RESOLUTION"
                                      - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/resolutions/propose"
                                      - Payload: Debe incluir "resourceId", "riskProbability": <el valor del riesgo>, y "aiPlanJson" que contenga un string JSON escapado con la siguiente estructura de Acción Diferida:
@@ -113,10 +102,11 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
             cancellationToken);
 
         _logger.LogInformation(
-            "Decisión cognitiva generada para recurso {ResourceId}. Title={Title}, IsFallback={IsFallback}, Actions={ActionCount}",
+            "Decisión cognitiva generada para recurso {ResourceId}. Title={Title}, IsFallback={IsFallback}, ExpectsExternalApproval={ExpectsApproval}, Actions={ActionCount}",
             request.ResourceId,
             plan.Title,
             plan.IsFallback,
+            plan.ExpectsExternalApproval,
             plan.ProposedActions?.Count ?? 0);
 
         if (plan.IsFallback)
@@ -128,97 +118,17 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
             resolutionTask.ProposePlan(plan, promptTokens, completionTokens);
         }
 
-        var executions = new List<ActionExecution>();
-        if (!plan.IsFallback && plan.ProposedActions is { Count: > 0 })
-        {
-            for (int i = 0; i < plan.ProposedActions.Count; i++)
-            {
-                var action = plan.ProposedActions[i];
-                if (string.IsNullOrWhiteSpace(action.Endpoint))
-                    continue;
-
-                var payloadJson = JsonSerializer.Serialize(action.Payload ?? new Dictionary<string, object>());
-                executions.Add(ActionExecution.CreatePending(
-                    resolutionTask.Id,
-                    ActionExecutionPhase.Immediate,
-                    i,
-                    action.ActionType,
-                    action.Endpoint,
-                    payloadJson,
-                    $"{resolutionTask.Id}:{i}"));
-            }
-        }
-
-        // Transacción 1: persistir intención ANTES de despachar webhooks
+        // Transacción 1: persistir intención (ResolutionTask + ActionExecutions Pending) ANTES de despachar webhooks
         _repository.Add(resolutionTask);
-        if (executions.Count > 0)
-        {
-            _actionExecutionRepository.AddRange(executions);
-        }
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-        if (executions.Count == 0)
+        if (plan.IsFallback)
         {
             return resolutionTask.Id;
         }
 
-        await ExecutePendingActionsAsync(resolutionTask.Id, executions, cancellationToken);
+        await _coordinator.ExecutePhaseAsync(resolutionTask, ActionExecutionPhase.Immediate, cancellationToken);
 
         return resolutionTask.Id;
-    }
-
-    private async Task ExecutePendingActionsAsync(
-        Guid taskId,
-        List<ActionExecution> executions,
-        CancellationToken cancellationToken)
-    {
-        string? transientError = null;
-        int? transientStatus = null;
-
-        foreach (var execution in executions)
-        {
-            execution.MarkInProgress();
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-
-            var payload = JsonSerializer.Deserialize<Dictionary<string, object>>(execution.PayloadJson)
-                          ?? new Dictionary<string, object>();
-
-            var result = await _webhookDispatcher.DispatchAsync(
-                execution.Endpoint,
-                payload,
-                cancellationToken,
-                execution.IdempotencyKey,
-                taskId);
-
-            if (result.IsSuccess)
-            {
-                execution.MarkSucceeded(result.HttpStatusCode, result.Attempts, result.ExecutedAtUtc);
-            }
-            else if (result.IsPermanentFailure)
-            {
-                execution.MarkFailedPermanent(
-                    result.HttpStatusCode,
-                    result.Attempts,
-                    result.ErrorMessage,
-                    result.ExecutedAtUtc);
-            }
-            else
-            {
-                execution.MarkFailedTransient(
-                    result.HttpStatusCode,
-                    result.Attempts,
-                    result.ErrorMessage,
-                    result.ExecutedAtUtc);
-                transientError ??= result.ErrorMessage ?? "Error transitorio en despacho de webhook.";
-                transientStatus ??= result.HttpStatusCode;
-            }
-
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-        }
-
-        if (transientError is not null)
-        {
-            throw new TransientWebhookDispatchException(transientError, transientStatus);
-        }
     }
 }
