@@ -165,6 +165,10 @@ namespace Omro.Infrastructure.Migrations
                         .HasColumnType("character varying(1000)")
                         .HasColumnName("failure_reason");
 
+                    b.Property<DateTimeOffset?>("ProposalExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("proposal_expires_at");
+
                     b.Property<DateTime?>("ResolvedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("resolved_at");
@@ -592,7 +596,6 @@ namespace Omro.Infrastructure.Migrations
                     b.OwnsMany("Omro.Domain.ResolutionTasks.AgentReasoningTrace", "ReasoningTraces", b1 =>
                         {
                             b1.Property<Guid>("Id")
-                                .ValueGeneratedOnAdd()
                                 .HasColumnType("uuid");
 
                             b1.Property<string>("AgentName")

@@ -6,6 +6,7 @@ using MassTransit.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Moq;
+using Omro.Application.Contracts;
 using Omro.Application.Interfaces;
 using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
@@ -392,6 +393,7 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
             services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
             services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
+            services.AddSingleton<IAiPlanContractParser, AiPlanContractParser>();
             services.AddSingleton(orchestrator);
 
             services.AddResilientWebhookHttpClient(

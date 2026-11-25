@@ -283,7 +283,12 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                 metadataJson: decision.EvaluationSnapshotJson);
         }
 
-        resolutionTask.ProposePlan(finalPlan, promptTokens, completionTokens, planAgentName);
+        resolutionTask.ProposePlan(
+            finalPlan,
+            promptTokens,
+            completionTokens,
+            planAgentName,
+            proposalExpiresAt: decision.ProposalExpiresAt);
 
         // Transacción 1: persistir intención (ResolutionTask + ActionExecutions Pending + ShadowDecision) ANTES de despachar webhooks
         _repository.Add(resolutionTask);

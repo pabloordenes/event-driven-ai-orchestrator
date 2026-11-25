@@ -5,6 +5,7 @@ using MassTransit.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Omro.Application.Contracts;
 using Omro.Application.Interfaces;
 using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
@@ -154,6 +155,68 @@ public class PlanValidationIntegrationTests
         webhookHits.Should().Be(1); // Ningún webhook diferido fue despachado
     }
 
+    [Theory]
+    [InlineData("9.0", """{"DeferredActions":[]}""", "UNSUPPORTED_SCHEMA_VERSION")]
+    [InlineData("1.0", "{not-valid-json", "INVALID_AI_PLAN_JSON")]
+    public async Task ResolutionApprovedConsumer_WhenContractParseFails_ShouldFailClosedToNeedsHumanReview(
+        string schemaVersion,
+        string aiPlanJson,
+        string expectedErrorCode)
+    {
+        int webhookHits = 0;
+        var httpHandler = new DelegateHttpMessageHandler((_, _) =>
+        {
+            Interlocked.Increment(ref webhookHits);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+        });
+
+        var llm = new StubOrchestrator((_, _) => new CognitivePlan(
+            "HITL Proposal",
+            "Need human review",
+            0.80m,
+            [],
+            IsFallback: false,
+            ExpectsExternalApproval: true));
+
+        await using var ctx = await ValidationTestHost.CreateAsync(httpHandler, llm);
+        await ctx.SeedMedCareAsync(autonomousExecutionEnabled: false);
+
+        var resourceId = Guid.NewGuid();
+        await ctx.Harness.Bus.Publish(new AnomalyDetected(
+            TenantId: MedCareTenantId,
+            CorrelationId: Guid.NewGuid(),
+            AnomalyType: "ConfirmationDeadlineMissed",
+            ResourceId: resourceId,
+            RiskProbability: 0.72m,
+            Attributes: new Dictionary<string, string>
+            {
+                ["effective_score"] = "0.72",
+                ["final_notice_status"] = "Delivered"
+            }));
+
+        var waitingTask = await ctx.WaitForTaskAsync(t =>
+            t.Anomaly.ResourceId == resourceId && t.Status == ResolutionStatus.WaitingForExternalData);
+        waitingTask.Should().NotBeNull();
+        webhookHits.Should().Be(1);
+
+        await ctx.Harness.Bus.Publish(new ResolutionApproved(
+            TenantId: MedCareTenantId,
+            CorrelationId: Guid.NewGuid(),
+            ResolutionTaskId: waitingTask!.Id,
+            ResourceId: resourceId,
+            AiPlanJson: aiPlanJson,
+            SchemaVersion: schemaVersion));
+
+        var escalatedTask = await ctx.WaitForTaskAsync(t =>
+            t.Id == waitingTask.Id && t.Status == ResolutionStatus.NeedsHumanReview);
+
+        escalatedTask.Should().NotBeNull();
+        escalatedTask!.ReasoningTraces.Should().Contain(t =>
+            t.StepType == "PlanContractParseFailed" &&
+            t.TraceMessage.Contains(expectedErrorCode, StringComparison.Ordinal));
+        webhookHits.Should().Be(1);
+    }
+
     private sealed class StubOrchestrator : ICognitiveOrchestrator
     {
         private readonly Func<AnomalyEvent, string, CognitivePlan> _fn;
@@ -210,6 +273,7 @@ public class PlanValidationIntegrationTests
             services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
             services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
             services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
+            services.AddSingleton<IAiPlanContractParser, AiPlanContractParser>();
             services.AddSingleton(orchestrator);
 
             services.AddResilientWebhookHttpClient(

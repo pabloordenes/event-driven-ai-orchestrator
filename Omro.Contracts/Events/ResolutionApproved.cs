@@ -1,4 +1,5 @@
 using MassTransit;
+using Omro.Contracts.Plans;
 
 namespace Omro.Contracts.Events;
 
@@ -8,5 +9,7 @@ public record ResolutionApproved(
     Guid CorrelationId,
     Guid ResolutionTaskId,
     Guid ResourceId,
-    string AiPlanJson
+    string? AiPlanJson = null,
+    string SchemaVersion = PlanContractVersions.V1Legacy,
+    StructuredAiPlan? AiPlan = null
 );

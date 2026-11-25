@@ -26,6 +26,9 @@ public class ResolutionTaskConfiguration : IEntityTypeConfiguration<ResolutionTa
             .HasDefaultValue(false)
             .IsRequired();
 
+        builder.Property(t => t.ProposalExpiresAt)
+            .HasColumnName("proposal_expires_at");
+
         builder.Property(t => t.CreatedAt).IsRequired();
         builder.Property(t => t.UpdatedAt).IsRequired();
 

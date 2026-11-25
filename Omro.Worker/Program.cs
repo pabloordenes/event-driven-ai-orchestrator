@@ -1,6 +1,7 @@
 using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Omro.Application.Contracts;
 using Omro.Application.Interfaces;
 using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
@@ -59,6 +60,7 @@ builder.Services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>
 builder.Services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
 builder.Services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
 builder.Services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
+builder.Services.AddSingleton<IAiPlanContractParser, AiPlanContractParser>();
 builder.Services.AddSingleton<IOperationalAlertSink, LoggingOperationalAlertSink>();
 builder.Services.AddSingleton<DeadLetterAlertObserver>();
 
