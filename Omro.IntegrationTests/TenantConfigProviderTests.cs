@@ -256,7 +256,8 @@ public class TenantConfigProviderTests
                 It.IsAny<Dictionary<string, object>>(),
                 It.IsAny<CancellationToken>(),
                 It.IsAny<string?>(),
-                It.IsAny<Guid?>()))
+                It.IsAny<Guid?>(),
+                It.IsAny<WebhookDispatchOptions?>()))
             .ReturnsAsync(WebhookDispatchResult.Succeeded(200, 1));
         var configProvider = provider.GetRequiredService<ITenantConfigProvider>();
 

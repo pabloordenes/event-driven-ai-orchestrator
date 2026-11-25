@@ -69,7 +69,11 @@ public class ActionExecutionCoordinator : IActionExecutionCoordinator
                 payload,
                 cancellationToken,
                 execution.IdempotencyKey,
-                task.Id);
+                task.Id,
+                new WebhookDispatchOptions(
+                    TenantId: task.TenantId,
+                    HttpMethod: execution.HttpMethod,
+                    ActionType: execution.ActionType));
 
             if (result.IsSuccess)
             {

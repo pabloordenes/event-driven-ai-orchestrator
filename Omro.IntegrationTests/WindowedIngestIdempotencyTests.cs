@@ -350,8 +350,9 @@ public class WindowedIngestIdempotencyTests
                     It.IsAny<Dictionary<string, object>>(),
                     It.IsAny<CancellationToken>(),
                     It.IsAny<string?>(),
-                    It.IsAny<Guid?>()))
-                .Callback<string, Dictionary<string, object>, CancellationToken, string?, Guid?>((ep, _, _, key, tId) =>
+                    It.IsAny<Guid?>(),
+                    It.IsAny<WebhookDispatchOptions?>()))
+                .Callback<string, Dictionary<string, object>, CancellationToken, string?, Guid?, WebhookDispatchOptions?>((ep, _, _, key, tId, _) =>
                     host.DispatchedWebhooks.Add((ep, key, tId)))
                 .ReturnsAsync(WebhookDispatchResult.Succeeded(200, 1));
             services.AddSingleton(webhookMock.Object);
@@ -369,8 +370,9 @@ public class WindowedIngestIdempotencyTests
                     It.IsAny<Dictionary<string, object>>(),
                     It.IsAny<CancellationToken>(),
                     It.IsAny<string?>(),
-                    It.IsAny<Guid?>()))
-                .Callback<string, Dictionary<string, object>, CancellationToken, string?, Guid?>((ep, _, _, key, tId) =>
+                    It.IsAny<Guid?>(),
+                    It.IsAny<WebhookDispatchOptions?>()))
+                .Callback<string, Dictionary<string, object>, CancellationToken, string?, Guid?, WebhookDispatchOptions?>((ep, _, _, key, tId, _) =>
                     initialized.DispatchedWebhooks.Add((ep, key, tId)))
                 .ReturnsAsync(WebhookDispatchResult.Succeeded(200, 1));
 

@@ -210,7 +210,11 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
                 payloadDict,
                 cancellationToken,
                 idempotencyKey,
-                message.ResolutionTaskId);
+                message.ResolutionTaskId,
+                new WebhookDispatchOptions(
+                    TenantId: message.TenantId,
+                    HttpMethod: action.HttpMethod,
+                    ActionType: action.ActionType));
 
             if (!result.IsSuccess)
             {
