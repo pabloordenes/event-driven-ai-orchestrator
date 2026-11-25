@@ -13,6 +13,7 @@ using Omro.Infrastructure.Messaging.Observers;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
 using Omro.Infrastructure.Security;
+using Omro.Infrastructure.Tenants;
 using Omro.Worker.Consumers;
 using Quartz;
 
@@ -38,20 +39,32 @@ builder.Services.Configure<RabbitMqMessagingOptions>(
     builder.Configuration.GetSection(RabbitMqMessagingOptions.SectionName));
 builder.Services.Configure<WebhookExecutionOptions>(
     builder.Configuration.GetSection(WebhookExecutionOptions.SectionName));
+builder.Services.Configure<TenantCacheOptions>(
+    builder.Configuration.GetSection(TenantCacheOptions.SectionName));
+builder.Services.Configure<TenantSeedingOptions>(
+    builder.Configuration.GetSection(TenantSeedingOptions.SectionName));
+
+builder.Services.AddMemoryCache();
 
 var rabbitOptions = builder.Configuration
     .GetSection(RabbitMqMessagingOptions.SectionName)
     .Get<RabbitMqMessagingOptions>() ?? new RabbitMqMessagingOptions();
 
 builder.Services.AddSingleton<IOmroTokenService, OmroTokenService>();
+builder.Services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
 builder.Services.AddSingleton<IOperationalAlertSink, LoggingOperationalAlertSink>();
 builder.Services.AddSingleton<DeadLetterAlertObserver>();
 
 builder.Services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
 builder.Services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
+builder.Services.AddScoped<ITenantConfigRepository, TenantConfigRepository>();
+builder.Services.AddScoped<IShadowDecisionRepository, ShadowDecisionRepository>();
 builder.Services.AddScoped<IActionExecutionCoordinator, ActionExecutionCoordinator>();
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
+builder.Services.AddScoped<ITenantSeedLoader, JsonTenantSeedLoader>();
+
+builder.Services.AddHostedService<TenantSeedHostedService>();
 
 builder.Services.AddHttpClient<ICognitiveOrchestrator, GroqCognitiveOrchestrator>((sp, client) =>
 {

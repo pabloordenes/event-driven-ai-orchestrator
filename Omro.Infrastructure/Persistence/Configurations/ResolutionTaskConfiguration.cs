@@ -51,7 +51,7 @@ public class ResolutionTaskConfiguration : IEntityTypeConfiguration<ResolutionTa
             a.Property(p => p.AnomalyType)
                 .HasColumnName("anomaly_type")
                 .HasMaxLength(100)
-                .HasDefaultValue("AppointmentNoShowRisk")
+                .HasDefaultValue("GenericAnomaly")
                 .IsRequired();
 
             a.Property(p => p.CorrelationId)

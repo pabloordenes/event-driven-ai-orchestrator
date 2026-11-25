@@ -25,4 +25,10 @@
       <ProjectReference Include="..\Omro.Application\Omro.Application.csproj" />
       <ProjectReference Include="..\Omro.Infrastructure\Omro.Infrastructure.csproj" />
     </ItemGroup>
+
+    <ItemGroup>
+      <Content Update="Seeds\*.json">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
 </Project>

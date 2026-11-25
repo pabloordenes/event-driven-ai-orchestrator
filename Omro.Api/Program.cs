@@ -45,7 +45,7 @@ if (app.Environment.IsDevelopment())
             var simulacro = new AnomalyDetected(
                 TenantId: Guid.NewGuid(),
                 CorrelationId: Guid.NewGuid(),
-                AnomalyType: "AppointmentNoShowRisk",
+                AnomalyType: "GenericAnomaly",
                 ResourceId: Guid.NewGuid(),
                 RiskProbability: 0.90m,
                 Attributes: new Dictionary<string, string>()

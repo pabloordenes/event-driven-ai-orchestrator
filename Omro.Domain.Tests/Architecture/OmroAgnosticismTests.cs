@@ -15,7 +15,8 @@ public class OmroAgnosticismTests
         "Sobrecupo",
         "Overbook",
         "WaitingList",
-        "ScheduleBlock"
+        "ScheduleBlock",
+        "MedCare"
     ];
 
     [Fact]

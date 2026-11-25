@@ -8,13 +8,17 @@ using Moq;
 using Omro.Application.Interfaces;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Application.ResolutionTasks.Services;
+using Omro.Application.Tenants;
 using Omro.Contracts.Events;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
+using Omro.Domain.Tenants;
+using Omro.Infrastructure.Configuration;
 using Omro.Infrastructure.Messaging.Configuration;
 using Omro.Infrastructure.Messaging.Observers;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
+using Omro.Infrastructure.Tenants;
 using Omro.Worker.Consumers;
 
 namespace Omro.IntegrationTests;
@@ -32,12 +36,17 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
 
         services.AddDbContext<ApplicationDbContext>(options =>
             options.UseInMemoryDatabase(sharedDbName));
+        services.AddMemoryCache();
+        services.Configure<TenantCacheOptions>(_ => { });
 
         services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
         services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
+        services.AddScoped<ITenantConfigRepository, TenantConfigRepository>();
+        services.AddScoped<IShadowDecisionRepository, ShadowDecisionRepository>();
         services.AddScoped<IActionExecutionCoordinator, ActionExecutionCoordinator>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
         services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
+        services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
 
         _webhookMock = new Moq.Mock<IWebhookDispatcher>();
         _webhookMock
@@ -91,8 +100,11 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
     public async Task Should_Consume_AnomalyEvent_And_Save_ResolutionTask_To_Database()
     {
         // 1. ARRANGE
+        var tenantId = Guid.NewGuid();
+        await SeedTenantAsync(tenantId);
+
         var anomalyEvent = new AnomalyDetected(
-            TenantId: Guid.NewGuid(),
+            TenantId: tenantId,
             CorrelationId: Guid.NewGuid(),
             AnomalyType: "AppointmentNoShowRisk",
             ResourceId: Guid.NewGuid(),
@@ -125,6 +137,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
     public async Task Should_Deduplicate_RedeliveredAnomalyDetected_ByTenantResourceAndType()
     {
         var tenantId = Guid.NewGuid();
+        await SeedTenantAsync(tenantId);
         var resourceId = Guid.NewGuid();
         var anomaly = new AnomalyDetected(
             TenantId: tenantId,
@@ -257,6 +270,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             uow,
             orchestrator,
             coordinator,
+            new StubTenantConfigProvider(),
             NullLogger<IngestAnomalyCommandHandler>.Instance);
         var taskId = await cmdHandler.Handle(new IngestAnomalyCommand(Guid.NewGuid(), 0.91m, Guid.NewGuid()), CancellationToken.None);
 
@@ -337,6 +351,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             uow,
             captureOrchestrator,
             coordinator,
+            new StubTenantConfigProvider(),
             NullLogger<IngestAnomalyCommandHandler>.Instance);
 
         var attributes = new Dictionary<string, string>
@@ -360,6 +375,61 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         captureOrchestrator.CapturedAttributes!["final_notification_delivered"].Should().Be("false");
         captureOrchestrator.CapturedAttributes["clinical_exclusion"].Should().Be("true");
         captureOrchestrator.CapturedAttributes["auto_overbook_enabled"].Should().Be("false");
+    }
+
+    private async Task SeedTenantAsync(Guid tenantId)
+    {
+        using var scope = _provider.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        if (await db.TenantConfigs.AnyAsync(t => t.TenantId == tenantId))
+            return;
+
+        var tenant = TenantConfig.Create(
+            tenantId,
+            $"tenant-{tenantId:N}",
+            "Test Tenant",
+            "Contexto de prueba cargado desde ITenantConfigProvider.",
+            "tenant-api");
+        tenant.AddAction(TenantAction.Create(
+            tenantId,
+            "GENERATE_OVERBOOK",
+            "Acción de prueba",
+            "https://medcare.test/api/appointments/overbook"));
+
+        db.TenantConfigs.Add(tenant);
+        await db.SaveChangesAsync();
+    }
+
+    private sealed class StubTenantConfigProvider : ITenantConfigProvider
+    {
+        public Task<TenantConfiguration?> GetTenantConfigurationAsync(
+            Guid tenantId,
+            CancellationToken cancellationToken = default)
+        {
+            var config = new TenantConfiguration(
+                TenantId: tenantId,
+                TenantSlug: "stub-tenant",
+                DisplayName: "Stub Tenant",
+                IsActive: true,
+                BasePromptContext: "Contexto de prueba stub",
+                AutonomousExecutionEnabled: false,
+                FeatureFlags: new Dictionary<string, System.Text.Json.JsonElement>(),
+                HitlProposalTtlMinutes: 180,
+                HitlProposalMinLeadMinutes: 60,
+                DedupWindowMinutes: 60,
+                AllowedOrigins: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "https://medcare.test" },
+                Auth: new TenantAuthProfile(TenantAuthScheme.Rs256Jwt, "omro-orchestrator", "tenant-api", "omro_service", null, null, null),
+                MaxPayloadBytes: 65536,
+                EgressTimeoutSeconds: 15,
+                LlmSettings: new TenantLlmSettings(),
+                ConfigVersion: 1,
+                Actions: new Dictionary<string, TenantActionDescriptor>(StringComparer.OrdinalIgnoreCase),
+                Policies: new Dictionary<string, TenantPolicyDescriptor>(StringComparer.OrdinalIgnoreCase));
+
+            return Task.FromResult<TenantConfiguration?>(config);
+        }
+
+        public void Invalidate(Guid tenantId) { }
     }
 
     private sealed class CapturingCognitiveOrchestrator : ICognitiveOrchestrator

@@ -6,7 +6,7 @@ public record IngestAnomalyCommand(
     Guid TenantId,
     decimal RiskProbability,
     Guid ResourceId,
-    string AnomalyType = "AppointmentNoShowRisk",
+    string AnomalyType = "GenericAnomaly",
     Guid CorrelationId = default,
     IReadOnlyDictionary<string, string>? Attributes = null
 ) : IRequest<Guid>;
