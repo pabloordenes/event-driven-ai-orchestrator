@@ -21,14 +21,15 @@ public class ResolutionTask
     private readonly List<ActionExecution> _actionExecutions = new();
     public IReadOnlyList<ActionExecution> ActionExecutions => _actionExecutions.AsReadOnly();
 
-    public ResolutionTask(Guid tenantId, AnomalyEvent anomaly)
+    public ResolutionTask(Guid tenantId, AnomalyEvent anomaly, DateTime? createdAtUtc = null)
     {
+        var now = createdAtUtc ?? DateTime.UtcNow;
         Id = Guid.NewGuid();
         TenantId = tenantId;
         Anomaly = anomaly;
         Status = ResolutionStatus.Ingested;
-        CreatedAt = DateTime.UtcNow;
-        UpdatedAt = DateTime.UtcNow;
+        CreatedAt = now;
+        UpdatedAt = now;
     }
 
     private ResolutionTask() { } // ef core
@@ -57,7 +58,8 @@ public class ResolutionTask
         int completionTokens,
         string agentName = "CognitiveOrchestrator",
         string? traceSummary = null,
-        DateTimeOffset? proposalExpiresAt = null)
+        DateTimeOffset? proposalExpiresAt = null,
+        IEnumerable<(string ActionType, string Endpoint, string HttpMethod, string PayloadJson, string IdempotencyKey)>? validatedImmediateActions = null)
     {
         if (Status != ResolutionStatus.Analyzing)
             throw new InvalidOperationException("Solo se pueden proponer planes en estado de análisis.");
@@ -67,7 +69,28 @@ public class ResolutionTask
         ProposalExpiresAt = plan.ExpectsExternalApproval ? proposalExpiresAt : null;
         UpdatedAt = DateTime.UtcNow;
 
-        if (plan.ProposedActions is { Count: > 0 })
+        if (validatedImmediateActions is not null)
+        {
+            int index = 0;
+            foreach (var (actionType, endpoint, httpMethod, payloadJson, idempotencyKey) in validatedImmediateActions)
+            {
+                if (!string.IsNullOrWhiteSpace(endpoint))
+                {
+                    _actionExecutions.Add(ActionExecution.CreatePending(
+                        Id,
+                        ActionExecutionPhase.Immediate,
+                        index,
+                        actionType,
+                        endpoint,
+                        payloadJson,
+                        idempotencyKey,
+                        httpMethod));
+                }
+
+                index++;
+            }
+        }
+        else if (plan.ProposedActions is { Count: > 0 })
         {
             for (int i = 0; i < plan.ProposedActions.Count; i++)
             {
@@ -83,7 +106,8 @@ public class ResolutionTask
                     action.ActionType,
                     action.Endpoint,
                     payloadJson,
-                    $"{Id}:{i}"));
+                    $"omro:{Id:N}:i:{i}",
+                    "POST"));
             }
         }
 
@@ -190,12 +214,24 @@ public class ResolutionTask
         return RegisterDeferredActions(actions.Select(a => (
             ActionType: "DEFERRED_WEBHOOK",
             a.Endpoint,
+            HttpMethod: "POST",
             a.PayloadJson,
             a.IdempotencyKey)));
     }
 
     public IReadOnlyList<ActionExecution> RegisterDeferredActions(
         IEnumerable<(string ActionType, string Endpoint, string PayloadJson, string IdempotencyKey)> actions)
+    {
+        return RegisterDeferredActions(actions.Select(a => (
+            a.ActionType,
+            a.Endpoint,
+            HttpMethod: "POST",
+            a.PayloadJson,
+            a.IdempotencyKey)));
+    }
+
+    public IReadOnlyList<ActionExecution> RegisterDeferredActions(
+        IEnumerable<(string ActionType, string Endpoint, string HttpMethod, string PayloadJson, string IdempotencyKey)> actions)
     {
         if (Status == ResolutionStatus.Failed)
             throw new InvalidOperationException($"No se pueden registrar acciones diferidas sobre la tarea {Id} en estado '{Status}'.");
@@ -208,7 +244,7 @@ public class ResolutionTask
         var newlyAdded = new List<ActionExecution>();
         int index = 0;
 
-        foreach (var (actionType, endpoint, payloadJson, idempotencyKey) in actions)
+        foreach (var (actionType, endpoint, httpMethod, payloadJson, idempotencyKey) in actions)
         {
             if (!string.IsNullOrWhiteSpace(endpoint) && !existingIndices.Contains(index))
             {
@@ -219,7 +255,8 @@ public class ResolutionTask
                     string.IsNullOrWhiteSpace(actionType) ? "DEFERRED_WEBHOOK" : actionType.Trim(),
                     endpoint,
                     payloadJson,
-                    idempotencyKey);
+                    idempotencyKey,
+                    httpMethod);
                 _actionExecutions.Add(execution);
                 newlyAdded.Add(execution);
             }

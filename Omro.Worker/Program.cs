@@ -55,12 +55,14 @@ var rabbitOptions = builder.Configuration
     .GetSection(RabbitMqMessagingOptions.SectionName)
     .Get<RabbitMqMessagingOptions>() ?? new RabbitMqMessagingOptions();
 
+builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IOmroTokenService, OmroTokenService>();
 builder.Services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
 builder.Services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
 builder.Services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
 builder.Services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
 builder.Services.AddSingleton<IAiPlanContractParser, AiPlanContractParser>();
+builder.Services.AddSingleton<IActionIdempotencyKeyGenerator, ActionIdempotencyKeyGenerator>();
 builder.Services.AddSingleton<IOperationalAlertSink, LoggingOperationalAlertSink>();
 builder.Services.AddSingleton<DeadLetterAlertObserver>();
 

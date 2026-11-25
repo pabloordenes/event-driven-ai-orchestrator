@@ -273,10 +273,20 @@ public class ResolutionLifecycleAndCrashRecoveryTests
         resolvedTask.ActionExecutions.Should().HaveCount(2);
         resolvedTask.ActionExecutions.Should().Contain(e =>
             e.Phase == ActionExecutionPhase.Immediate && e.Status == ActionExecutionStatus.Succeeded);
+
+        var expectedDeferredKey = new ActionIdempotencyKeyGenerator().Generate(
+            waitingTask.Id,
+            ActionExecutionPhase.Deferred,
+            0,
+            "MONITOR_RESOURCE",
+            "POST",
+            "https://tenant.test/api/appointments/monitor");
+        expectedDeferredKey.Length.Should().BeLessThanOrEqualTo(100);
+
         resolvedTask.ActionExecutions.Should().Contain(e =>
             e.Phase == ActionExecutionPhase.Deferred &&
             e.Status == ActionExecutionStatus.Succeeded &&
-            e.IdempotencyKey == $"{externalTaskId}:deferred:0");
+            e.IdempotencyKey == expectedDeferredKey);
 
         hitPaths.Should().Contain("/api/resolutions/propose");
         hitPaths.Should().Contain("/api/appointments/monitor");
@@ -394,6 +404,7 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
             services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
             services.AddSingleton<IAiPlanContractParser, AiPlanContractParser>();
+            services.AddSingleton<IActionIdempotencyKeyGenerator, ActionIdempotencyKeyGenerator>();
             services.AddSingleton(orchestrator);
 
             services.AddResilientWebhookHttpClient(

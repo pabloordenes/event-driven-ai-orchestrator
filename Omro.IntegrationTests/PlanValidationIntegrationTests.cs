@@ -274,6 +274,7 @@ public class PlanValidationIntegrationTests
             services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
             services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
             services.AddSingleton<IAiPlanContractParser, AiPlanContractParser>();
+            services.AddSingleton<IActionIdempotencyKeyGenerator, ActionIdempotencyKeyGenerator>();
             services.AddSingleton(orchestrator);
 
             services.AddResilientWebhookHttpClient(

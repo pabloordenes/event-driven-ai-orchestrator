@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Omro.Application.Interfaces;
 using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Services;
+using Omro.Domain.Exceptions;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
 
@@ -10,6 +11,8 @@ namespace Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 
 public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand, Guid>
 {
+    private const int DefaultDedupWindowMinutes = 60;
+
     private readonly IResolutionTaskRepository _repository;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICognitiveOrchestrator _orchestrator;
@@ -19,6 +22,8 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
     private readonly IDeterministicPlanBuilder _planBuilder;
     private readonly IPlanValidator _planValidator;
     private readonly IShadowDecisionRepository _shadowDecisionRepository;
+    private readonly IActionIdempotencyKeyGenerator _idempotencyKeyGenerator;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<IngestAnomalyCommandHandler> _logger;
 
     public IngestAnomalyCommandHandler(
@@ -31,7 +36,9 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         IDeterministicPlanBuilder planBuilder,
         IPlanValidator planValidator,
         IShadowDecisionRepository shadowDecisionRepository,
-        ILogger<IngestAnomalyCommandHandler> logger)
+        ILogger<IngestAnomalyCommandHandler> logger,
+        IActionIdempotencyKeyGenerator? idempotencyKeyGenerator = null,
+        TimeProvider? timeProvider = null)
     {
         _repository = repository;
         _unitOfWork = unitOfWork;
@@ -43,14 +50,24 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         _planValidator = planValidator;
         _shadowDecisionRepository = shadowDecisionRepository;
         _logger = logger;
+        _idempotencyKeyGenerator = idempotencyKeyGenerator ?? new ActionIdempotencyKeyGenerator();
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public async Task<Guid> Handle(IngestAnomalyCommand request, CancellationToken cancellationToken)
     {
-        var existingTask = await _repository.GetByKeyAsync(
+        var utcNow = _timeProvider.GetUtcNow();
+        var tenantConfig = await _tenantConfigProvider.GetTenantConfigurationAsync(request.TenantId, cancellationToken);
+        var dedupWindowMinutes = tenantConfig?.ResolveDedupWindowMinutes(request.AnomalyType) ?? DefaultDedupWindowMinutes;
+        DateTime? windowStartUtc = dedupWindowMinutes > 0
+            ? utcNow.UtcDateTime.AddMinutes(-dedupWindowMinutes)
+            : null;
+
+        var existingTask = await _repository.FindActiveOrWithinWindowAsync(
             request.TenantId,
             request.ResourceId,
             request.AnomalyType,
+            windowStartUtc,
             cancellationToken);
 
         if (existingTask != null)
@@ -66,10 +83,12 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
             }
 
             _logger.LogInformation(
-                "[OMRO IDEMPOTENCIA] Anomalía duplicada ({TenantId}, {ResourceId}, {AnomalyType}). Retornando tarea existente {TaskId} en estado {Status}.",
+                "[OMRO IDEMPOTENCIA] Anomalía deduplicada ({TenantId}, {ResourceId}, {AnomalyType}) dentro de ventana ({WindowMinutes}m, CreatedAt={CreatedAtUtc:O}). Retornando tarea existente {TaskId} en estado {Status}.",
                 request.TenantId,
                 request.ResourceId,
                 request.AnomalyType,
+                dedupWindowMinutes,
+                existingTask.CreatedAt,
                 existingTask.Id,
                 existingTask.Status);
             return existingTask.Id;
@@ -82,10 +101,9 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
             AnomalyType: request.AnomalyType,
             CorrelationId: request.CorrelationId);
 
-        var resolutionTask = new ResolutionTask(request.TenantId, anomalyEvent);
+        var resolutionTask = new ResolutionTask(request.TenantId, anomalyEvent, utcNow.UtcDateTime);
         resolutionTask.StartAnalysis();
 
-        var tenantConfig = await _tenantConfigProvider.GetTenantConfigurationAsync(request.TenantId, cancellationToken);
         if (tenantConfig is null || !tenantConfig.IsActive)
         {
             var reason = tenantConfig is null
@@ -99,12 +117,10 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                 reason);
 
             resolutionTask.MarkNeedsHumanReview(reason);
-            _repository.Add(resolutionTask);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-            return resolutionTask.Id;
+            var (_, savedMissingTenantTask) = await TryPersistNewTaskAsync(resolutionTask, windowStartUtc, cancellationToken);
+            return savedMissingTenantTask.Id;
         }
 
-        var utcNow = DateTimeOffset.UtcNow;
         var decision = _policyEngine.Evaluate(new PolicyEvaluationInput(
             Tenant: tenantConfig,
             Anomaly: anomalyEvent,
@@ -132,9 +148,8 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                 decision.MatchedRuleId,
                 decision.Reason,
                 decision.EvaluationSnapshotJson);
-            _repository.Add(resolutionTask);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-            return resolutionTask.Id;
+            var (_, savedNoActionTask) = await TryPersistNewTaskAsync(resolutionTask, windowStartUtc, cancellationToken);
+            return savedNoActionTask.Id;
         }
 
         if (decision.Outcome == PolicyOutcome.EscalateToHumanReview)
@@ -144,9 +159,8 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                 agentName: "PolicyEngine",
                 stepType: "PolicyEscalated",
                 metadataJson: decision.EvaluationSnapshotJson);
-            _repository.Add(resolutionTask);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-            return resolutionTask.Id;
+            var (_, savedEscalatedTask) = await TryPersistNewTaskAsync(resolutionTask, windowStartUtc, cancellationToken);
+            return savedEscalatedTask.Id;
         }
 
         var baseBuildResult = _planBuilder.BuildBasePlan(
@@ -171,9 +185,8 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                 agentName: "PolicyEngine",
                 stepType: "PolicyCatalogMismatch",
                 metadataJson: decision.EvaluationSnapshotJson);
-            _repository.Add(resolutionTask);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-            return resolutionTask.Id;
+            var (_, savedMismatchTask) = await TryPersistNewTaskAsync(resolutionTask, windowStartUtc, cancellationToken);
+            return savedMismatchTask.Id;
         }
 
         var finalPlan = baseBuildResult.Plan;
@@ -248,9 +261,8 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                 agentName: "PlanValidator",
                 stepType: "PlanValidationFailed",
                 metadataJson: validation.ToAuditJson());
-            _repository.Add(resolutionTask);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-            return resolutionTask.Id;
+            var (_, savedInvalidTask) = await TryPersistNewTaskAsync(resolutionTask, windowStartUtc, cancellationToken);
+            return savedInvalidTask.Id;
         }
 
         if (decision.ShadowIntent is not null)
@@ -283,19 +295,75 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                 metadataJson: decision.EvaluationSnapshotJson);
         }
 
+        var immediateSpecs = validation.ValidatedActions
+            .Select((action, index) => (
+                action.ActionType,
+                action.Endpoint,
+                action.HttpMethod,
+                action.PayloadJson,
+                _idempotencyKeyGenerator.Generate(
+                    resolutionTask.Id,
+                    ActionExecutionPhase.Immediate,
+                    index,
+                    action.ActionType,
+                    action.HttpMethod,
+                    action.Endpoint)))
+            .ToList();
+
         resolutionTask.ProposePlan(
             finalPlan,
             promptTokens,
             completionTokens,
             planAgentName,
-            proposalExpiresAt: decision.ProposalExpiresAt);
+            proposalExpiresAt: decision.ProposalExpiresAt,
+            validatedImmediateActions: immediateSpecs);
 
         // Transacción 1: persistir intención (ResolutionTask + ActionExecutions Pending + ShadowDecision) ANTES de despachar webhooks
-        _repository.Add(resolutionTask);
-        await _unitOfWork.SaveChangesAsync(cancellationToken);
+        var (persisted, persistedTask) = await TryPersistNewTaskAsync(resolutionTask, windowStartUtc, cancellationToken);
+        if (!persisted)
+        {
+            return persistedTask.Id;
+        }
 
-        await _coordinator.ExecutePhaseAsync(resolutionTask, ActionExecutionPhase.Immediate, cancellationToken);
+        await _coordinator.ExecutePhaseAsync(persistedTask, ActionExecutionPhase.Immediate, cancellationToken);
 
-        return resolutionTask.Id;
+        return persistedTask.Id;
+    }
+
+    private async Task<(bool Persisted, ResolutionTask Task)> TryPersistNewTaskAsync(
+        ResolutionTask candidate,
+        DateTime? windowStartUtc,
+        CancellationToken cancellationToken)
+    {
+        _repository.Add(candidate);
+        try
+        {
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            return (true, candidate);
+        }
+        catch (DuplicateActiveTaskException ex)
+        {
+            var winner = await _repository.FindActiveOrWithinWindowAsync(
+                candidate.TenantId,
+                candidate.Anomaly.ResourceId,
+                candidate.Anomaly.AnomalyType,
+                windowStartUtc,
+                cancellationToken);
+
+            if (winner is not null)
+            {
+                _logger.LogInformation(
+                    ex,
+                    "[OMRO DEDUP RACE] Conflicto concurrente detectado para ({TenantId}, {ResourceId}, {AnomalyType}). Recuperando tarea ganadora {WinnerTaskId} sin despachar webhooks.",
+                    candidate.TenantId,
+                    candidate.Anomaly.ResourceId,
+                    candidate.Anomaly.AnomalyType,
+                    winner.Id);
+
+                return (false, winner);
+            }
+
+            throw;
+        }
     }
 }

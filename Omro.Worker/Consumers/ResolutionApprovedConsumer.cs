@@ -21,6 +21,7 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
     private readonly ITenantConfigProvider _tenantConfigProvider;
     private readonly IPlanValidator _planValidator;
     private readonly IAiPlanContractParser _planParser;
+    private readonly IActionIdempotencyKeyGenerator _idempotencyKeyGenerator;
     private readonly ILogger<ResolutionApprovedConsumer> _logger;
 
     public ResolutionApprovedConsumer(
@@ -32,6 +33,7 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
         ITenantConfigProvider tenantConfigProvider,
         IPlanValidator planValidator,
         IAiPlanContractParser planParser,
+        IActionIdempotencyKeyGenerator idempotencyKeyGenerator,
         ILogger<ResolutionApprovedConsumer> logger)
     {
         _webhookDispatcher = webhookDispatcher;
@@ -42,6 +44,7 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
         _tenantConfigProvider = tenantConfigProvider;
         _planValidator = planValidator;
         _planParser = planParser;
+        _idempotencyKeyGenerator = idempotencyKeyGenerator;
         _logger = logger;
     }
 
@@ -160,8 +163,15 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
             var deferredSpecs = validation.ValidatedActions.Select((action, index) => (
                 action.ActionType,
                 action.Endpoint,
+                action.HttpMethod,
                 action.PayloadJson,
-                $"{message.ResolutionTaskId}:deferred:{index}"
+                _idempotencyKeyGenerator.Generate(
+                    existingTask.Id,
+                    ActionExecutionPhase.Deferred,
+                    index,
+                    action.ActionType,
+                    action.HttpMethod,
+                    action.Endpoint)
             ));
 
             var addedExecutions = existingTask.RegisterDeferredActions(deferredSpecs);
@@ -182,7 +192,13 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
             var payloadDict = JsonSerializer.Deserialize<Dictionary<string, object>>(action.PayloadJson)
                               ?? new Dictionary<string, object>();
 
-            var idempotencyKey = $"{message.ResolutionTaskId}:deferred:{i}";
+            var idempotencyKey = _idempotencyKeyGenerator.Generate(
+                message.ResolutionTaskId,
+                ActionExecutionPhase.Deferred,
+                i,
+                action.ActionType,
+                action.HttpMethod,
+                action.Endpoint);
             _logger.LogInformation(
                 "OMRO: Ejecutando Acción Diferida validada {ActionType} hacia {Endpoint} (Idempotency-Key: {IdempotencyKey})",
                 action.ActionType,
