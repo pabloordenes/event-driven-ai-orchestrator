@@ -50,7 +50,12 @@ public class ResolutionTask
         ));
     }
 
-    public void ProposePlan(CognitivePlan plan, int promptTokens, int completionTokens)
+    public void ProposePlan(
+        CognitivePlan plan,
+        int promptTokens,
+        int completionTokens,
+        string agentName = "CognitiveOrchestrator",
+        string? traceSummary = null)
     {
         if (Status != ResolutionStatus.Analyzing)
             throw new InvalidOperationException("Solo se pueden proponer planes en estado de análisis.");
@@ -80,19 +85,78 @@ public class ResolutionTask
         }
 
         string metadataJson = JsonSerializer.Serialize(plan);
+        string effectiveAgent = string.IsNullOrWhiteSpace(agentName) ? "CognitiveOrchestrator" : agentName.Trim();
+        string message = string.IsNullOrWhiteSpace(traceSummary)
+            ? $"Plan propuesto por {effectiveAgent}. Costo: {promptTokens + completionTokens} tokens."
+            : traceSummary.Trim();
 
         _reasoningTraces.Add(new AgentReasoningTrace(
             resolutionTaskId: Id,
-            agentName: "GroqCognitiveOrchestrator",
+            agentName: effectiveAgent,
             stepType: "PlanGenerated",
-            traceMessage: $"Plan propuesto por IA. Costo: {promptTokens + completionTokens} tokens.",
+            traceMessage: message,
             metadataJson: metadataJson,
             promptTokens: promptTokens,
             completionTokens: completionTokens
         ));
     }
 
-    public void MarkNeedsHumanReview(string reason, CognitivePlan? fallbackPlan = null)
+    public void RecordTrace(
+        string agentName,
+        string stepType,
+        string traceMessage,
+        string? metadataJson = null,
+        int promptTokens = 0,
+        int completionTokens = 0)
+    {
+        if (string.IsNullOrWhiteSpace(agentName))
+            throw new ArgumentException("AgentName es obligatorio.", nameof(agentName));
+        if (string.IsNullOrWhiteSpace(stepType))
+            throw new ArgumentException("StepType es obligatorio.", nameof(stepType));
+        if (string.IsNullOrWhiteSpace(traceMessage))
+            throw new ArgumentException("TraceMessage es obligatorio.", nameof(traceMessage));
+
+        _reasoningTraces.Add(new AgentReasoningTrace(
+            resolutionTaskId: Id,
+            agentName: agentName.Trim(),
+            stepType: stepType.Trim(),
+            traceMessage: traceMessage.Trim(),
+            metadataJson: metadataJson,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens
+        ));
+    }
+
+    public void CompleteWithPolicyNoAction(string ruleId, string reason, string? metadataJson = null)
+    {
+        if (Status != ResolutionStatus.Analyzing)
+            throw new InvalidOperationException("Solo se puede completar con NoAction desde el estado de análisis.");
+
+        var effectiveRule = string.IsNullOrWhiteSpace(ruleId) ? "default" : ruleId.Trim();
+        var effectiveReason = string.IsNullOrWhiteSpace(reason) ? "Sin acción requerida por política." : reason.Trim();
+        var utcNow = DateTime.UtcNow;
+
+        Status = ResolutionStatus.Resolved;
+        ResolvedAt = utcNow;
+        UpdatedAt = utcNow;
+
+        _reasoningTraces.Add(new AgentReasoningTrace(
+            resolutionTaskId: Id,
+            agentName: "PolicyEngine",
+            stepType: "PolicyNoAction",
+            traceMessage: $"Política '{effectiveRule}' determinó NoAction: {effectiveReason}",
+            metadataJson: metadataJson,
+            promptTokens: 0,
+            completionTokens: 0
+        ));
+    }
+
+    public void MarkNeedsHumanReview(
+        string reason,
+        CognitivePlan? fallbackPlan = null,
+        string agentName = "Orchestrator",
+        string stepType = "FallbackNeedsHumanReview",
+        string? metadataJson = null)
     {
         if (Status != ResolutionStatus.Analyzing)
             throw new InvalidOperationException("Solo se puede escalar a revisión humana desde el estado de análisis.");
@@ -100,14 +164,18 @@ public class ResolutionTask
         Status = ResolutionStatus.NeedsHumanReview;
         UpdatedAt = DateTime.UtcNow;
 
-        string? metadataJson = fallbackPlan != null ? JsonSerializer.Serialize(fallbackPlan) : null;
+        string? effectiveMetadata = !string.IsNullOrWhiteSpace(metadataJson)
+            ? metadataJson
+            : (fallbackPlan != null ? JsonSerializer.Serialize(fallbackPlan) : null);
+        string effectiveAgent = string.IsNullOrWhiteSpace(agentName) ? "Orchestrator" : agentName.Trim();
+        string effectiveStepType = string.IsNullOrWhiteSpace(stepType) ? "FallbackNeedsHumanReview" : stepType.Trim();
 
         _reasoningTraces.Add(new AgentReasoningTrace(
             resolutionTaskId: Id,
-            agentName: "GroqCognitiveOrchestrator",
-            stepType: "FallbackNeedsHumanReview",
+            agentName: effectiveAgent,
+            stepType: effectiveStepType,
             traceMessage: $"Escalado a revisión humana sin despacho automático. Motivo: {reason}",
-            metadataJson: metadataJson,
+            metadataJson: effectiveMetadata,
             promptTokens: 0,
             completionTokens: 0
         ));

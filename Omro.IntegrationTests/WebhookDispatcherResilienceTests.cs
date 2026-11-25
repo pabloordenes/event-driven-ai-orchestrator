@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Moq;
 using Omro.Application.Interfaces;
+using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Application.ResolutionTasks.Services;
 using Omro.Contracts.Events;
@@ -198,6 +199,8 @@ public class WebhookDispatcherResilienceTests
         services.AddScoped<IUnitOfWork, UnitOfWork>();
         services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
         services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
+        services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
+        services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
 
         var webhookMock = new Moq.Mock<IWebhookDispatcher>();
         webhookMock
@@ -269,12 +272,40 @@ public class WebhookDispatcherResilienceTests
             using (var seedScope = provider.CreateScope())
             {
                 var seedDb = seedScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-                seedDb.TenantConfigs.Add(TenantConfig.Create(
+                var seedTenant = TenantConfig.Create(
                     tenantId,
                     $"tenant-{tenantId:N}",
                     "Test Tenant",
                     "Prompt context",
-                    "tenant-api"));
+                    "tenant-api",
+                    autonomousExecutionEnabled: true);
+                seedTenant.AddAction(TenantAction.Create(
+                    tenantId,
+                    "OVERBOOK",
+                    "Test action",
+                    "https://medcare.test/api/appointments/overbook",
+                    defaultPayloadTemplateJson: "{\"ok\":true}"));
+                seedTenant.AddPolicy(TenantPolicy.Create(
+                    tenantId,
+                    "AppointmentNoShowRisk",
+                    """
+                    {
+                      "hitPolicy": "FIRST_MATCH",
+                      "rules": [
+                        {
+                          "ruleId": "auto",
+                          "priority": 10,
+                          "when": { "field": "riskProbability", "op": "gte", "value": 0.85 },
+                          "then": {
+                            "outcome": "ExecuteActions",
+                            "invokeLlmEnrichment": true,
+                            "actions": [{ "actionType": "OVERBOOK" }]
+                          }
+                        }
+                      ]
+                    }
+                    """));
+                seedDb.TenantConfigs.Add(seedTenant);
                 await seedDb.SaveChangesAsync();
             }
 
