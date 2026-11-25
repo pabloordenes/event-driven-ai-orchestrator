@@ -19,6 +19,7 @@ using Omro.Infrastructure.Messaging.Configuration;
 using Omro.Infrastructure.Messaging.Observers;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
+using Omro.Infrastructure.Security;
 using Omro.Infrastructure.Tenants;
 using Omro.Infrastructure.Validation;
 using Omro.Worker.Consumers;
@@ -261,6 +262,8 @@ public class PlanValidationIntegrationTests
             services.AddMemoryCache();
             services.Configure<TenantCacheOptions>(_ => { });
             services.Configure<PlanValidationOptions>(_ => { });
+            services.Configure<OmroServiceAuthOptions>(_ => { });
+            services.Configure<EgressSecurityOptions>(_ => { });
             services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
             services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
             services.AddScoped<ITenantConfigRepository, TenantConfigRepository>();
@@ -275,6 +278,11 @@ public class PlanValidationIntegrationTests
             services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
             services.AddSingleton<IAiPlanContractParser, AiPlanContractParser>();
             services.AddSingleton<IActionIdempotencyKeyGenerator, ActionIdempotencyKeyGenerator>();
+            services.AddSingleton<IOmroTokenService, OmroTokenService>();
+            services.AddSingleton<ISecretResolver, ConfigurationSecretResolver>();
+            services.AddSingleton<ITenantAuthSigner, TenantAuthSigner>();
+            services.AddSingleton<IDnsResolver, StubPublicDnsResolver>();
+            services.AddSingleton<ISsrfGuard, SsrfGuard>();
             services.AddSingleton(orchestrator);
 
             services.AddResilientWebhookHttpClient(
@@ -382,5 +390,11 @@ public class PlanValidationIntegrationTests
             await Harness.Stop();
             await Provider.DisposeAsync();
         }
+    }
+
+    private sealed class StubPublicDnsResolver : IDnsResolver
+    {
+        public Task<IPAddress[]> GetHostAddressesAsync(string host, CancellationToken cancellationToken = default)
+            => Task.FromResult(new[] { IPAddress.Parse("93.184.216.34") });
     }
 }

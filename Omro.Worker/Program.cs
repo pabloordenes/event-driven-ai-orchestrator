@@ -48,6 +48,8 @@ builder.Services.Configure<TenantSeedingOptions>(
     builder.Configuration.GetSection(TenantSeedingOptions.SectionName));
 builder.Services.Configure<PlanValidationOptions>(
     builder.Configuration.GetSection(PlanValidationOptions.SectionName));
+builder.Services.Configure<EgressSecurityOptions>(
+    builder.Configuration.GetSection(EgressSecurityOptions.SectionName));
 
 builder.Services.AddMemoryCache();
 
@@ -57,6 +59,10 @@ var rabbitOptions = builder.Configuration
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IOmroTokenService, OmroTokenService>();
+builder.Services.AddSingleton<ISecretResolver, ConfigurationSecretResolver>();
+builder.Services.AddSingleton<ITenantAuthSigner, TenantAuthSigner>();
+builder.Services.AddSingleton<IDnsResolver, SystemDnsResolver>();
+builder.Services.AddSingleton<ISsrfGuard, SsrfGuard>();
 builder.Services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
 builder.Services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
 builder.Services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();

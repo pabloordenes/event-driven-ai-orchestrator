@@ -215,7 +215,8 @@ public class WebhookDispatcherResilienceTests
                 Moq.It.IsAny<Dictionary<string, object>>(),
                 Moq.It.IsAny<CancellationToken>(),
                 Moq.It.IsAny<string?>(),
-                Moq.It.IsAny<Guid?>()))
+                Moq.It.IsAny<Guid?>(),
+                Moq.It.IsAny<WebhookDispatchOptions?>()))
             .Callback(() => Interlocked.Increment(ref webhookCalls))
             .ReturnsAsync(WebhookDispatchResult.Succeeded(200, 1));
         services.AddSingleton(webhookMock.Object);
@@ -374,10 +375,17 @@ public class WebhookDispatcherResilienceTests
     {
         var services = new ServiceCollection();
         services.AddLogging();
+        services.AddSingleton<IDnsResolver, StubPublicDnsResolver>();
         services.AddResilientWebhookHttpClient(
             configure,
             builder => builder.ConfigurePrimaryHttpMessageHandler(() => primaryHandler));
         return services.BuildServiceProvider();
+    }
+
+    private sealed class StubPublicDnsResolver : IDnsResolver
+    {
+        public Task<IPAddress[]> GetHostAddressesAsync(string host, CancellationToken cancellationToken = default)
+            => Task.FromResult(new[] { IPAddress.Parse("93.184.216.34") });
     }
 
     private sealed class DelegateHttpMessageHandler : HttpMessageHandler

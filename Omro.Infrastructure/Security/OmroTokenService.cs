@@ -68,19 +68,58 @@ public class OmroTokenService : IOmroTokenService, IDisposable
 
     public string GenerateToken()
     {
-        var claims = new[]
+        var issuer = string.IsNullOrWhiteSpace(_options.Issuer) ? "omro-orchestrator" : _options.Issuer;
+        var audience = string.IsNullOrWhiteSpace(_options.Audience) ? "omro-tenant-api" : _options.Audience;
+        var role = string.IsNullOrWhiteSpace(_options.Role) ? "omro_service" : _options.Role;
+        return GenerateToken(issuer, audience, role);
+    }
+
+    public string GenerateToken(
+        string issuer,
+        string audience,
+        string role,
+        Guid? tenantId = null,
+        string? keyId = null,
+        DateTimeOffset? utcNow = null)
+    {
+        if (string.IsNullOrWhiteSpace(audience))
+            throw new ArgumentException("Audience es obligatorio para generar el JWT de servicio.", nameof(audience));
+
+        var effectiveIssuer = string.IsNullOrWhiteSpace(issuer)
+            ? (string.IsNullOrWhiteSpace(_options.Issuer) ? "omro-orchestrator" : _options.Issuer)
+            : issuer.Trim();
+        var effectiveRole = string.IsNullOrWhiteSpace(role)
+            ? (string.IsNullOrWhiteSpace(_options.Role) ? "omro_service" : _options.Role)
+            : role.Trim();
+        var now = (utcNow ?? DateTimeOffset.UtcNow).UtcDateTime;
+
+        var claims = new List<Claim>
         {
-            new Claim("role", string.IsNullOrWhiteSpace(_options.Role) ? "omro_service" : _options.Role),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+            new("role", effectiveRole),
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
         };
+
+        if (tenantId.HasValue && tenantId.Value != Guid.Empty)
+        {
+            claims.Add(new Claim("tid", tenantId.Value.ToString()));
+        }
+
+        var credentials = _signingCredentials;
+        if (!string.IsNullOrWhiteSpace(keyId))
+        {
+            var keyedRsaKey = new RsaSecurityKey(_rsa) { KeyId = keyId.Trim() };
+            credentials = new SigningCredentials(keyedRsaKey, SecurityAlgorithms.RsaSha256);
+        }
 
         var tokenDescriptor = new SecurityTokenDescriptor
         {
             Subject = new ClaimsIdentity(claims),
-            Issuer = string.IsNullOrWhiteSpace(_options.Issuer) ? "omro-orchestrator" : _options.Issuer,
-            Audience = string.IsNullOrWhiteSpace(_options.Audience) ? "medcareos-api" : _options.Audience,
-            Expires = DateTime.UtcNow.AddMinutes(5),
-            SigningCredentials = _signingCredentials
+            Issuer = effectiveIssuer,
+            Audience = audience.Trim(),
+            NotBefore = now,
+            IssuedAt = now,
+            Expires = now.AddMinutes(5),
+            SigningCredentials = credentials
         };
 
         var tokenHandler = new JwtSecurityTokenHandler();

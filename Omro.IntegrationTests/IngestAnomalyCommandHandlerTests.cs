@@ -64,7 +64,8 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
                 Moq.It.IsAny<Dictionary<string, object>>(),
                 Moq.It.IsAny<CancellationToken>(),
                 Moq.It.IsAny<string?>(),
-                Moq.It.IsAny<Guid?>()))
+                Moq.It.IsAny<Guid?>(),
+                Moq.It.IsAny<WebhookDispatchOptions?>()))
             .ReturnsAsync(WebhookDispatchResult.Succeeded(200, 1));
         services.AddSingleton(_webhookMock.Object);
 
@@ -187,7 +188,8 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             Moq.It.IsAny<Dictionary<string, object>>(),
             Moq.It.IsAny<CancellationToken>(),
             expectedKey,
-            Moq.It.IsAny<Guid?>()), Moq.Times.Once);
+            Moq.It.IsAny<Guid?>(),
+            Moq.It.IsAny<WebhookDispatchOptions?>()), Moq.Times.Once);
     }
 
     [Fact]
@@ -234,7 +236,8 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             Moq.It.IsAny<Dictionary<string, object>>(),
             Moq.It.IsAny<CancellationToken>(),
             expectedDeferredKey,
-            Moq.It.IsAny<Guid?>()), Moq.Times.Once);
+            Moq.It.IsAny<Guid?>(),
+            Moq.It.IsAny<WebhookDispatchOptions?>()), Moq.Times.Once);
     }
 
     public class FakeCognitiveOrchestrator : ICognitiveOrchestrator
@@ -275,7 +278,8 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
                 Moq.It.IsAny<Dictionary<string, object>>(),
                 Moq.It.IsAny<CancellationToken>(),
                 Moq.It.IsAny<string?>(),
-                Moq.It.IsAny<Guid?>()))
+                Moq.It.IsAny<Guid?>(),
+                Moq.It.IsAny<WebhookDispatchOptions?>()))
             .ReturnsAsync(WebhookDispatchResult.Succeeded(200, 1));
 
         var dbOptions = new DbContextOptionsBuilder<ApplicationDbContext>()
@@ -338,7 +342,8 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             Moq.It.IsAny<Dictionary<string, object>>(),
             Moq.It.IsAny<CancellationToken>(),
             expectedKey,
-            taskId), Moq.Times.Once);
+            taskId,
+            Moq.It.IsAny<WebhookDispatchOptions?>()), Moq.Times.Once);
     }
 
     [Fact]
@@ -454,7 +459,8 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
                 Moq.It.IsAny<Dictionary<string, object>>(),
                 Moq.It.IsAny<CancellationToken>(),
                 Moq.It.IsAny<string?>(),
-                Moq.It.IsAny<Guid?>()))
+                Moq.It.IsAny<Guid?>(),
+                Moq.It.IsAny<WebhookDispatchOptions?>()))
             .ReturnsAsync(WebhookDispatchResult.Succeeded(200, 1));
         var coordinator = new ActionExecutionCoordinator(webhookMock.Object, uow, NullLogger<ActionExecutionCoordinator>.Instance);
 
