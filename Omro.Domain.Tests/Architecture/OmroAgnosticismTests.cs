@@ -24,6 +24,7 @@ public class OmroAgnosticismTests
     {
         var assemblies = new[]
         {
+            typeof(Omro.Contracts.Events.AnomalyDetected).Assembly,
             typeof(Omro.Domain.ResolutionTasks.ResolutionTask).Assembly,
             typeof(Omro.Application.Interfaces.ICognitiveOrchestrator).Assembly,
             typeof(Omro.Infrastructure.CognitiveServices.Agents.GroqCognitiveOrchestrator).Assembly
