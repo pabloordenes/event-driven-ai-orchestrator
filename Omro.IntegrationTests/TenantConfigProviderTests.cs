@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Moq;
 using Omro.Application.Interfaces;
+using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Application.ResolutionTasks.Services;
 using Omro.Domain.Repositories;
@@ -156,6 +157,9 @@ public class TenantConfigProviderTests
         using var execScope = provider.CreateScope();
         var repo = execScope.ServiceProvider.GetRequiredService<IResolutionTaskRepository>();
         var uow = execScope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+        var shadowRepo = execScope.ServiceProvider.GetRequiredService<IShadowDecisionRepository>();
+        var policyEngine = execScope.ServiceProvider.GetRequiredService<IPolicyEngine>();
+        var planBuilder = execScope.ServiceProvider.GetRequiredService<IDeterministicPlanBuilder>();
         var coordinator = new ActionExecutionCoordinator(webhookMock.Object, uow, NullLogger<ActionExecutionCoordinator>.Instance);
         var handler = new IngestAnomalyCommandHandler(
             repo,
@@ -163,6 +167,9 @@ public class TenantConfigProviderTests
             orchestratorMock.Object,
             coordinator,
             configProvider,
+            policyEngine,
+            planBuilder,
+            shadowRepo,
             NullLogger<IngestAnomalyCommandHandler>.Instance);
 
         var unknownTaskId = await handler.Handle(
@@ -202,7 +209,28 @@ public class TenantConfigProviderTests
                 tenantId,
                 "NOTIFY_OPS",
                 "Notify operations",
-                "https://custom.test/api/notify"));
+                "https://custom.test/api/notify",
+                defaultPayloadTemplateJson: "{\"resourceId\":\"{{resourceId}}\"}"));
+            tenant.AddPolicy(TenantPolicy.Create(
+                tenantId,
+                "CustomAnomaly",
+                """
+                {
+                  "hitPolicy": "FIRST_MATCH",
+                  "rules": [
+                    {
+                      "ruleId": "notify",
+                      "priority": 10,
+                      "when": { "field": "riskProbability", "op": "gte", "value": 0.50 },
+                      "then": {
+                        "outcome": "ExecuteActions",
+                        "invokeLlmEnrichment": true,
+                        "actions": [{ "actionType": "NOTIFY_OPS" }]
+                      }
+                    }
+                  ]
+                }
+                """));
             db.TenantConfigs.Add(tenant);
             await db.SaveChangesAsync();
         }
@@ -215,14 +243,25 @@ public class TenantConfigProviderTests
                 It.IsAny<string>(),
                 It.IsAny<CancellationToken>()))
             .Callback<AnomalyEvent, string, CancellationToken>((_, ctx, _) => capturedPrompt = ctx)
-            .ReturnsAsync((new CognitivePlan("Plan", "Reason", 0.9m, [], IsFallback: true), 5, 5));
+            .ReturnsAsync((new CognitivePlan("Plan", "Reason", 0.9m, [], IsFallback: false), 5, 5));
 
-        var webhookMock = new Mock<IWebhookDispatcher>(MockBehavior.Strict);
+        var webhookMock = new Mock<IWebhookDispatcher>();
+        webhookMock
+            .Setup(w => w.DispatchAsync(
+                "https://custom.test/api/notify",
+                It.IsAny<Dictionary<string, object>>(),
+                It.IsAny<CancellationToken>(),
+                It.IsAny<string?>(),
+                It.IsAny<Guid?>()))
+            .ReturnsAsync(WebhookDispatchResult.Succeeded(200, 1));
         var configProvider = provider.GetRequiredService<ITenantConfigProvider>();
 
         using var execScope = provider.CreateScope();
         var repo = execScope.ServiceProvider.GetRequiredService<IResolutionTaskRepository>();
         var uow = execScope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+        var shadowRepo = execScope.ServiceProvider.GetRequiredService<IShadowDecisionRepository>();
+        var policyEngine = execScope.ServiceProvider.GetRequiredService<IPolicyEngine>();
+        var planBuilder = execScope.ServiceProvider.GetRequiredService<IDeterministicPlanBuilder>();
         var coordinator = new ActionExecutionCoordinator(webhookMock.Object, uow, NullLogger<ActionExecutionCoordinator>.Instance);
         var handler = new IngestAnomalyCommandHandler(
             repo,
@@ -230,6 +269,9 @@ public class TenantConfigProviderTests
             orchestratorMock.Object,
             coordinator,
             configProvider,
+            policyEngine,
+            planBuilder,
+            shadowRepo,
             NullLogger<IngestAnomalyCommandHandler>.Instance);
 
         await handler.Handle(
@@ -265,6 +307,8 @@ public class TenantConfigProviderTests
         services.AddScoped<IUnitOfWork, UnitOfWork>();
         services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
         services.AddScoped<ITenantSeedLoader, JsonTenantSeedLoader>();
+        services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
+        services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
         services.AddLogging();
 
         return services.BuildServiceProvider();

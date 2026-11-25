@@ -96,7 +96,7 @@
       "defaultPayloadTemplate": {
         "resourceId": "{{resourceId}}",
         "riskProbability": "{{riskProbability}}",
-        "aiPlanJson": "{\"DeferredActions\":[{\"Endpoint\":\"${OMRO_SEED_MEDCARE_BASE_URL:-https://medcare-cqrs-clinical-api.onrender.com}/api/appointments/overbook\",\"Payload\":{\"resourceId\":\"{{resourceId}}\",\"reason\":\"{{policyReason}}\",\"correlationId\":\"{{correlationId}}\",\"decisionMode\":\"Approved\"}}]}"
+        "aiPlanJson": "{{deferredPlanJson}}"
       },
       "isActive": true
     },
@@ -152,8 +152,14 @@
             "description": "Si el aviso final no fue entregado, nunca sobrecupar; el tenant escala internamente a ReceptionTask.",
             "when": {
               "any": [
-                { "field": "attributes.final_notice_status", "op": "neq", "value": "Delivered", "whenPresent": true },
-                { "field": "attributes.final_notification_delivered", "op": "neq", "value": "true", "whenPresent": true }
+                { "field": "attributes.final_notice_status", "op": "not_in", "values": [ "Delivered", "Read" ], "onMissing": false },
+                { "field": "attributes.final_notification_delivered", "op": "neq", "value": "true", "onMissing": false },
+                {
+                  "all": [
+                    { "field": "attributes.final_notice_status", "op": "not_exists" },
+                    { "field": "attributes.final_notification_delivered", "op": "not_exists" }
+                  ]
+                }
               ]
             },
             "then": {
@@ -199,13 +205,13 @@
                 },
                 {
                   "any": [
-                    { "field": "attributes.final_notice_status", "op": "eq", "value": "Delivered" },
+                    { "field": "attributes.final_notice_status", "op": "in", "values": [ "Delivered", "Read" ] },
                     { "field": "attributes.final_notification_delivered", "op": "eq", "value": "true" }
                   ]
                 },
-                { "field": "attributes.clinical_exclusion", "op": "neq", "value": "true" },
-                { "field": "attributes.clinical_flags", "op": "is_empty" },
-                { "field": "attributes.edad", "op": "lt", "value": 70, "whenPresent": true }
+                { "field": "attributes.clinical_exclusion", "op": "neq", "value": "true", "onMissing": true },
+                { "field": "attributes.clinical_flags", "op": "is_empty", "onMissing": true },
+                { "field": "attributes.edad", "op": "lt", "value": 70, "onMissing": true }
               ]
             },
             "then": {
@@ -262,9 +268,9 @@
                     },
                     {
                       "any": [
-                        { "field": "attributes.clinical_exclusion", "op": "eq", "value": "true" },
-                        { "field": "attributes.clinical_flags", "op": "not_empty" },
-                        { "field": "attributes.edad", "op": "gte", "value": 70 }
+                        { "field": "attributes.clinical_exclusion", "op": "eq", "value": "true", "onMissing": false },
+                        { "field": "attributes.clinical_flags", "op": "not_empty", "onMissing": false },
+                        { "field": "attributes.edad", "op": "gte", "value": 70, "onMissing": false }
                       ]
                     }
                   ]

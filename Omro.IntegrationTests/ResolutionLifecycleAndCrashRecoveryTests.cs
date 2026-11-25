@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Moq;
 using Omro.Application.Interfaces;
+using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Application.ResolutionTasks.Services;
 using Omro.Contracts.Events;
@@ -386,6 +387,8 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             services.AddScoped<IUnitOfWork, UnitOfWork>();
             services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
             services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
+            services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
+            services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
             services.AddSingleton(orchestrator);
 
             services.AddResilientWebhookHttpClient(
@@ -443,12 +446,65 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             if (await db.TenantConfigs.AnyAsync(t => t.TenantId == tenantId))
                 return;
 
-            db.TenantConfigs.Add(TenantConfig.Create(
+            var tenant = TenantConfig.Create(
                 tenantId,
                 $"tenant-{tenantId:N}",
                 "Test Tenant",
                 "Test prompt context",
-                "tenant-api"));
+                "tenant-api",
+                autonomousExecutionEnabled: true);
+
+            tenant.AddAction(TenantAction.Create(
+                tenantId,
+                "GENERATE_OVERBOOK",
+                "Autonomous overbook",
+                "https://tenant.test/api/overbook",
+                defaultPayloadTemplateJson: "{\"resourceId\":\"{{resourceId}}\"}"));
+
+            tenant.AddAction(TenantAction.Create(
+                tenantId,
+                "PROPOSE_RESOLUTION",
+                "HITL proposal",
+                "https://tenant.test/api/resolutions/propose",
+                defaultPayloadTemplateJson: "{\"resourceId\":\"{{resourceId}}\"}",
+                requiresApproval: true,
+                allowedPhases: TenantActionPhase.Immediate));
+
+            tenant.AddPolicy(TenantPolicy.Create(
+                tenantId,
+                "AppointmentNoShowRisk",
+                """
+                {
+                  "hitPolicy": "FIRST_MATCH",
+                  "rules": [
+                    {
+                      "ruleId": "high-risk-auto",
+                      "priority": 10,
+                      "when": { "field": "riskProbability", "op": "gte", "value": 0.85 },
+                      "then": {
+                        "outcome": "ExecuteActions",
+                        "expectsExternalApproval": false,
+                        "invokeLlmEnrichment": true,
+                        "actions": [{ "actionType": "GENERATE_OVERBOOK" }]
+                      }
+                    },
+                    {
+                      "ruleId": "moderate-risk-hitl",
+                      "priority": 20,
+                      "when": { "field": "riskProbability", "op": "range_half_open", "minInclusive": 0.50, "maxExclusive": 0.85 },
+                      "then": {
+                        "outcome": "ProposeForApproval",
+                        "expectsExternalApproval": true,
+                        "invokeLlmEnrichment": true,
+                        "actions": [{ "actionType": "PROPOSE_RESOLUTION" }]
+                      }
+                    }
+                  ],
+                  "defaultDecision": { "outcome": "NoAction", "invokeLlmEnrichment": false, "actions": [] }
+                }
+                """));
+
+            db.TenantConfigs.Add(tenant);
             await db.SaveChangesAsync();
         }
 

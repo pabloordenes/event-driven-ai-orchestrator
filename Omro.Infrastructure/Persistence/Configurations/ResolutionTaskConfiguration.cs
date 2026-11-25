@@ -63,6 +63,7 @@ public class ResolutionTaskConfiguration : IEntityTypeConfiguration<ResolutionTa
         {
             rt.ToTable("AGENT_REASONING_TRACE");
             rt.HasKey(t => t.Id);
+            rt.Property(t => t.Id).ValueGeneratedNever();
             
             rt.Property(t => t.AgentName).HasColumnName("agent_name").HasMaxLength(100).IsRequired();
             rt.Property(t => t.StepType).HasColumnName("step_type").HasMaxLength(50).IsRequired();

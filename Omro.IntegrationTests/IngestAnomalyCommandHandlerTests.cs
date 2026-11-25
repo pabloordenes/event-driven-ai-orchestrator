@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Omro.Application.Interfaces;
+using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Application.ResolutionTasks.Services;
 using Omro.Application.Tenants;
@@ -47,6 +48,8 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         services.AddScoped<IUnitOfWork, UnitOfWork>();
         services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
         services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
+        services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
+        services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
 
         _webhookMock = new Moq.Mock<IWebhookDispatcher>();
         _webhookMock
@@ -237,9 +240,18 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task GroqFallback_WhenApiFails_ShouldPersistNeedsHumanReviewAndDispatchNoWebhooks()
+    public async Task GroqFallback_WhenApiFails_AndPolicyAuthorizesAction_ShouldExecuteDeterministicFallbackPlan()
     {
         var handlerMock = new Moq.Mock<IWebhookDispatcher>(Moq.MockBehavior.Strict);
+        handlerMock
+            .Setup(w => w.DispatchAsync(
+                "https://medcare.test/api/appointments/overbook",
+                Moq.It.IsAny<Dictionary<string, object>>(),
+                Moq.It.IsAny<CancellationToken>(),
+                Moq.It.IsAny<string?>(),
+                Moq.It.IsAny<Guid?>()))
+            .ReturnsAsync(WebhookDispatchResult.Succeeded(200, 1));
+
         var dbOptions = new DbContextOptionsBuilder<ApplicationDbContext>()
             .UseInMemoryDatabase(Guid.NewGuid().ToString())
             .Options;
@@ -247,6 +259,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         await using var db = new ApplicationDbContext(dbOptions);
         var repo = new ResolutionTaskRepository(db);
         var uow = new UnitOfWork(db);
+        var shadowRepo = new ShadowDecisionRepository(db);
         var coordinator = new ActionExecutionCoordinator(
             handlerMock.Object,
             uow,
@@ -270,15 +283,69 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             uow,
             orchestrator,
             coordinator,
-            new StubTenantConfigProvider(),
+            new StubTenantConfigProvider(includeGenericPolicy: true),
+            new JsonDecisionTablePolicyEngine(),
+            new DeterministicPlanBuilder(),
+            shadowRepo,
             NullLogger<IngestAnomalyCommandHandler>.Instance);
         var taskId = await cmdHandler.Handle(new IngestAnomalyCommand(Guid.NewGuid(), 0.91m, Guid.NewGuid()), CancellationToken.None);
 
         failingHttpClient.DefaultRequestHeaders.Authorization.Should().BeNull();
-        var saved = await db.ResolutionTasks.FirstOrDefaultAsync(t => t.Id == taskId);
+        var saved = await db.ResolutionTasks
+            .Include(t => t.ReasoningTraces)
+            .FirstOrDefaultAsync(t => t.Id == taskId);
+        saved.Should().NotBeNull();
+        saved!.Status.Should().Be(ResolutionStatus.Resolved);
+        saved.ReasoningTraces.Should().Contain(t => t.StepType == "LlmUnavailableDeterministicFallback");
+        handlerMock.Verify(w => w.DispatchAsync(
+            "https://medcare.test/api/appointments/overbook",
+            Moq.It.IsAny<Dictionary<string, object>>(),
+            Moq.It.IsAny<CancellationToken>(),
+            $"{taskId}:0",
+            taskId), Moq.Times.Once);
+    }
+
+    [Fact]
+    public async Task NoPolicy_ShouldEscalateToNeedsHumanReviewAndDispatchNoWebhooks()
+    {
+        var handlerMock = new Moq.Mock<IWebhookDispatcher>(Moq.MockBehavior.Strict);
+        var dbOptions = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        await using var db = new ApplicationDbContext(dbOptions);
+        var repo = new ResolutionTaskRepository(db);
+        var uow = new UnitOfWork(db);
+        var shadowRepo = new ShadowDecisionRepository(db);
+        var coordinator = new ActionExecutionCoordinator(
+            handlerMock.Object,
+            uow,
+            NullLogger<ActionExecutionCoordinator>.Instance);
+
+        var orchestratorMock = new Moq.Mock<ICognitiveOrchestrator>(Moq.MockBehavior.Strict);
+        var cmdHandler = new IngestAnomalyCommandHandler(
+            repo,
+            uow,
+            orchestratorMock.Object,
+            coordinator,
+            new StubTenantConfigProvider(includeGenericPolicy: false),
+            new JsonDecisionTablePolicyEngine(),
+            new DeterministicPlanBuilder(),
+            shadowRepo,
+            NullLogger<IngestAnomalyCommandHandler>.Instance);
+
+        var taskId = await cmdHandler.Handle(
+            new IngestAnomalyCommand(Guid.NewGuid(), 0.91m, Guid.NewGuid(), "UnconfiguredAnomaly"),
+            CancellationToken.None);
+
+        var saved = await db.ResolutionTasks
+            .Include(t => t.ReasoningTraces)
+            .FirstOrDefaultAsync(t => t.Id == taskId);
         saved.Should().NotBeNull();
         saved!.Status.Should().Be(ResolutionStatus.NeedsHumanReview);
+        saved.ReasoningTraces.Should().Contain(t => t.StepType == "PolicyEscalated");
         handlerMock.VerifyNoOtherCalls();
+        orchestratorMock.VerifyNoOtherCalls();
     }
 
     [Fact]
@@ -342,7 +409,16 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         await using var db = new ApplicationDbContext(dbOptions);
         var repo = new ResolutionTaskRepository(db);
         var uow = new UnitOfWork(db);
-        var webhookMock = new Moq.Mock<IWebhookDispatcher>(Moq.MockBehavior.Strict);
+        var shadowRepo = new ShadowDecisionRepository(db);
+        var webhookMock = new Moq.Mock<IWebhookDispatcher>();
+        webhookMock
+            .Setup(w => w.DispatchAsync(
+                Moq.It.IsAny<string>(),
+                Moq.It.IsAny<Dictionary<string, object>>(),
+                Moq.It.IsAny<CancellationToken>(),
+                Moq.It.IsAny<string?>(),
+                Moq.It.IsAny<Guid?>()))
+            .ReturnsAsync(WebhookDispatchResult.Succeeded(200, 1));
         var coordinator = new ActionExecutionCoordinator(webhookMock.Object, uow, NullLogger<ActionExecutionCoordinator>.Instance);
 
         var captureOrchestrator = new CapturingCognitiveOrchestrator();
@@ -351,7 +427,10 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             uow,
             captureOrchestrator,
             coordinator,
-            new StubTenantConfigProvider(),
+            new StubTenantConfigProvider(includeGenericPolicy: true),
+            new JsonDecisionTablePolicyEngine(),
+            new DeterministicPlanBuilder(),
+            shadowRepo,
             NullLogger<IngestAnomalyCommandHandler>.Instance);
 
         var attributes = new Dictionary<string, string>
@@ -389,12 +468,36 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             $"tenant-{tenantId:N}",
             "Test Tenant",
             "Contexto de prueba cargado desde ITenantConfigProvider.",
-            "tenant-api");
+            "tenant-api",
+            autonomousExecutionEnabled: true);
         tenant.AddAction(TenantAction.Create(
             tenantId,
             "GENERATE_OVERBOOK",
             "Acción de prueba",
-            "https://medcare.test/api/appointments/overbook"));
+            "https://medcare.test/api/appointments/overbook",
+            defaultPayloadTemplateJson: "{\"resourceId\":\"{{resourceId}}\",\"reason\":\"{{policyReason}}\"}",
+            llmEditableFieldsJson: "[\"reason\"]"));
+        tenant.AddPolicy(TenantPolicy.Create(
+            tenantId,
+            "AppointmentNoShowRisk",
+            """
+            {
+              "hitPolicy": "FIRST_MATCH",
+              "rules": [
+                {
+                  "ruleId": "high-risk-auto",
+                  "priority": 10,
+                  "when": { "field": "riskProbability", "op": "gte", "value": 0.85 },
+                  "then": {
+                    "outcome": "ExecuteActions",
+                    "invokeLlmEnrichment": true,
+                    "actions": [{ "actionType": "GENERATE_OVERBOOK" }]
+                  }
+                }
+              ],
+              "defaultDecision": { "outcome": "NoAction", "invokeLlmEnrichment": false, "actions": [] }
+            }
+            """));
 
         db.TenantConfigs.Add(tenant);
         await db.SaveChangesAsync();
@@ -402,17 +505,104 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
 
     private sealed class StubTenantConfigProvider : ITenantConfigProvider
     {
+        private readonly bool _includeGenericPolicy;
+
+        public StubTenantConfigProvider(bool includeGenericPolicy = false)
+        {
+            _includeGenericPolicy = includeGenericPolicy;
+        }
+
         public Task<TenantConfiguration?> GetTenantConfigurationAsync(
             Guid tenantId,
             CancellationToken cancellationToken = default)
         {
+            var actions = new Dictionary<string, TenantActionDescriptor>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["GENERATE_OVERBOOK"] = new(
+                    Id: Guid.NewGuid(),
+                    ActionType: "GENERATE_OVERBOOK",
+                    Description: "Acción de prueba",
+                    EndpointUrl: "https://medcare.test/api/appointments/overbook",
+                    HttpMethod: "POST",
+                    PayloadSchemaJson: "{}",
+                    DefaultPayloadTemplateJson: "{\"resourceId\":\"{{resourceId}}\"}",
+                    LlmEditableFields: ["reason"],
+                    RequiresApproval: false,
+                    AllowedPhases: TenantActionPhase.Both,
+                    RetryPolicy: new ActionRetryPolicy(),
+                    SchemaVersion: 1),
+                ["PROPOSE_RESOLUTION"] = new(
+                    Id: Guid.NewGuid(),
+                    ActionType: "PROPOSE_RESOLUTION",
+                    Description: "Propuesta HITL",
+                    EndpointUrl: "https://medcare.test/api/resolutions/propose",
+                    HttpMethod: "POST",
+                    PayloadSchemaJson: "{}",
+                    DefaultPayloadTemplateJson: "{\"resourceId\":\"{{resourceId}}\"}",
+                    LlmEditableFields: Array.Empty<string>(),
+                    RequiresApproval: true,
+                    AllowedPhases: TenantActionPhase.Immediate,
+                    RetryPolicy: new ActionRetryPolicy(),
+                    SchemaVersion: 1)
+            };
+
+            var policies = new Dictionary<string, TenantPolicyDescriptor>(StringComparer.OrdinalIgnoreCase);
+            if (_includeGenericPolicy)
+            {
+                policies["GenericAnomaly"] = new(
+                    Guid.NewGuid(),
+                    "GenericAnomaly",
+                    1,
+                    60,
+                    """
+                    {
+                      "hitPolicy": "FIRST_MATCH",
+                      "rules": [
+                        {
+                          "ruleId": "generic-auto",
+                          "priority": 10,
+                          "when": { "field": "riskProbability", "op": "gte", "value": 0.85 },
+                          "then": {
+                            "outcome": "ExecuteActions",
+                            "invokeLlmEnrichment": true,
+                            "actions": [{ "actionType": "GENERATE_OVERBOOK" }]
+                          }
+                        }
+                      ]
+                    }
+                    """);
+                policies["ConfirmationDeadlineMissed"] = new(
+                    Guid.NewGuid(),
+                    "ConfirmationDeadlineMissed",
+                    1,
+                    60,
+                    """
+                    {
+                      "hitPolicy": "FIRST_MATCH",
+                      "rules": [
+                        {
+                          "ruleId": "deadline-propose",
+                          "priority": 10,
+                          "when": { "field": "riskProbability", "op": "gte", "value": 0.50 },
+                          "then": {
+                            "outcome": "ProposeForApproval",
+                            "expectsExternalApproval": true,
+                            "invokeLlmEnrichment": true,
+                            "actions": [{ "actionType": "PROPOSE_RESOLUTION" }]
+                          }
+                        }
+                      ]
+                    }
+                    """);
+            }
+
             var config = new TenantConfiguration(
                 TenantId: tenantId,
                 TenantSlug: "stub-tenant",
                 DisplayName: "Stub Tenant",
                 IsActive: true,
                 BasePromptContext: "Contexto de prueba stub",
-                AutonomousExecutionEnabled: false,
+                AutonomousExecutionEnabled: true,
                 FeatureFlags: new Dictionary<string, System.Text.Json.JsonElement>(),
                 HitlProposalTtlMinutes: 180,
                 HitlProposalMinLeadMinutes: 60,
@@ -423,8 +613,8 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
                 EgressTimeoutSeconds: 15,
                 LlmSettings: new TenantLlmSettings(),
                 ConfigVersion: 1,
-                Actions: new Dictionary<string, TenantActionDescriptor>(StringComparer.OrdinalIgnoreCase),
-                Policies: new Dictionary<string, TenantPolicyDescriptor>(StringComparer.OrdinalIgnoreCase));
+                Actions: actions,
+                Policies: policies);
 
             return Task.FromResult<TenantConfiguration?>(config);
         }

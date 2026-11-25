@@ -2,6 +2,7 @@ using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Omro.Application.Interfaces;
+using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Application.ResolutionTasks.Services;
 using Omro.Domain.Repositories;
@@ -52,6 +53,8 @@ var rabbitOptions = builder.Configuration
 
 builder.Services.AddSingleton<IOmroTokenService, OmroTokenService>();
 builder.Services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
+builder.Services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
+builder.Services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
 builder.Services.AddSingleton<IOperationalAlertSink, LoggingOperationalAlertSink>();
 builder.Services.AddSingleton<DeadLetterAlertObserver>();
 
