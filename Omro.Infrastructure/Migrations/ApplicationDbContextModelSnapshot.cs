@@ -23,6 +23,93 @@ namespace Omro.Infrastructure.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("Omro.Domain.Cognitive.LlmUsageLog", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("AnomalyType")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("anomaly_type");
+
+                    b.Property<int>("CompletionTokens")
+                        .HasColumnType("integer")
+                        .HasColumnName("completion_tokens");
+
+                    b.Property<string>("ErrorReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("error_reason");
+
+                    b.Property<decimal>("EstimatedCostUsd")
+                        .HasColumnType("numeric(18,8)")
+                        .HasColumnName("estimated_cost_usd");
+
+                    b.Property<int>("LatencyMs")
+                        .HasColumnType("integer")
+                        .HasColumnName("latency_ms");
+
+                    b.Property<string>("ModelName")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("model_name");
+
+                    b.Property<int>("PromptTokens")
+                        .HasColumnType("integer")
+                        .HasColumnName("prompt_tokens");
+
+                    b.Property<string>("ProviderName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("provider_name");
+
+                    b.Property<DateTimeOffset>("RecordedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("recorded_at");
+
+                    b.Property<Guid?>("ResolutionTaskId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("resolution_task_id");
+
+                    b.Property<Guid>("ResourceId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("resource_id");
+
+                    b.Property<bool>("Succeeded")
+                        .HasColumnType("boolean")
+                        .HasColumnName("succeeded");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("tenant_id");
+
+                    b.Property<int>("TotalTokens")
+                        .HasColumnType("integer")
+                        .HasColumnName("total_tokens");
+
+                    b.Property<bool>("UsedFallbackProvider")
+                        .HasColumnType("boolean")
+                        .HasColumnName("used_fallback_provider");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ResolutionTaskId")
+                        .HasDatabaseName("IX_llm_usage_log_task_id");
+
+                    b.HasIndex("ProviderName", "RecordedAt")
+                        .HasDatabaseName("IX_llm_usage_log_provider_recorded_at");
+
+                    b.HasIndex("TenantId", "RecordedAt")
+                        .HasDatabaseName("IX_llm_usage_log_tenant_recorded_at");
+
+                    b.ToTable("llm_usage_log", "omro");
+                });
+
             modelBuilder.Entity("Omro.Domain.Messaging.ProcessedMessage", b =>
                 {
                     b.Property<Guid>("MessageId")

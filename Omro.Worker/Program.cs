@@ -7,7 +7,9 @@ using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Application.ResolutionTasks.Services;
 using Omro.Domain.Repositories;
+using Omro.Infrastructure.CognitiveServices;
 using Omro.Infrastructure.CognitiveServices.Agents;
+using Omro.Infrastructure.CognitiveServices.Providers;
 using Omro.Infrastructure.Configuration;
 using Omro.Infrastructure.HttpClients;
 using Omro.Infrastructure.Messaging.Configuration;
@@ -36,6 +38,10 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
 // 3. Inyección de Repositorios, Unit of Work y Servicios de Infraestructura
 builder.Services.Configure<GroqOptions>(
     builder.Configuration.GetSection(GroqOptions.SectionName));
+builder.Services.Configure<GeminiOptions>(
+    builder.Configuration.GetSection(GeminiOptions.SectionName));
+builder.Services.Configure<CognitiveOrchestratorOptions>(
+    builder.Configuration.GetSection(CognitiveOrchestratorOptions.SectionName));
 builder.Services.Configure<OmroServiceAuthOptions>(
     builder.Configuration.GetSection(OmroServiceAuthOptions.SectionName));
 builder.Services.Configure<RabbitMqMessagingOptions>(
@@ -72,6 +78,7 @@ builder.Services.AddSingleton<IActionIdempotencyKeyGenerator, ActionIdempotencyK
 builder.Services.AddSingleton<IOperationalAlertSink, LoggingOperationalAlertSink>();
 builder.Services.AddSingleton<DeadLetterAlertObserver>();
 
+builder.Services.AddScoped<ILlmUsageLogRepository, LlmUsageLogRepository>();
 builder.Services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
 builder.Services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
 builder.Services.AddScoped<ITenantConfigRepository, TenantConfigRepository>();
@@ -81,13 +88,37 @@ builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
 builder.Services.AddScoped<ITenantSeedLoader, JsonTenantSeedLoader>();
 
+builder.Services.AddSingleton<ILlmCostCalculator, LlmCostCalculator>();
+builder.Services.AddSingleton<LlmTelemetryMetrics>();
+builder.Services.AddSingleton<ILlmUsageRecorder, EfLlmUsageRecorder>();
+
 builder.Services.AddHostedService<TenantSeedHostedService>();
 
-builder.Services.AddHttpClient<ICognitiveOrchestrator, GroqCognitiveOrchestrator>((sp, client) =>
+builder.Services.AddHttpClient(GroqLlmProvider.HttpClientName, (sp, client) =>
 {
     var groqOptions = sp.GetRequiredService<IOptions<GroqOptions>>().Value;
-    client.BaseAddress = new Uri(groqOptions.BaseUrl.TrimEnd('/') + "/");
+    var baseUrl = string.IsNullOrWhiteSpace(groqOptions.BaseUrl)
+        ? "https://api.groq.com/openai/v1/"
+        : groqOptions.BaseUrl;
+    client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+    client.Timeout = Timeout.InfiniteTimeSpan;
 });
+
+builder.Services.AddHttpClient(GeminiLlmProvider.HttpClientName, (sp, client) =>
+{
+    var geminiOptions = sp.GetRequiredService<IOptions<GeminiOptions>>().Value;
+    var baseUrl = string.IsNullOrWhiteSpace(geminiOptions.BaseUrl)
+        ? "https://generativelanguage.googleapis.com/v1beta/"
+        : geminiOptions.BaseUrl;
+    client.BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/");
+    client.Timeout = Timeout.InfiniteTimeSpan;
+});
+
+builder.Services.AddSingleton<ILlmProvider, GroqLlmProvider>();
+builder.Services.AddSingleton<ILlmProvider, GeminiLlmProvider>();
+builder.Services.AddSingleton<ResilientCognitiveOrchestrator>();
+builder.Services.AddSingleton<ICognitiveOrchestrator>(sp => sp.GetRequiredService<ResilientCognitiveOrchestrator>());
+builder.Services.AddSingleton<ITelemetryCognitiveOrchestrator>(sp => sp.GetRequiredService<ResilientCognitiveOrchestrator>());
 
 builder.Services.AddResilientWebhookHttpClient();
 
