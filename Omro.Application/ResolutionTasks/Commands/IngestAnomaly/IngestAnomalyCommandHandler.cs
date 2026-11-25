@@ -13,6 +13,7 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICognitiveOrchestrator _orchestrator;
     private readonly IActionExecutionCoordinator _coordinator;
+    private readonly ITenantConfigProvider _tenantConfigProvider;
     private readonly ILogger<IngestAnomalyCommandHandler> _logger;
 
     public IngestAnomalyCommandHandler(
@@ -20,12 +21,14 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         IUnitOfWork unitOfWork,
         ICognitiveOrchestrator orchestrator,
         IActionExecutionCoordinator coordinator,
+        ITenantConfigProvider tenantConfigProvider,
         ILogger<IngestAnomalyCommandHandler> logger)
     {
         _repository = repository;
         _unitOfWork = unitOfWork;
         _orchestrator = orchestrator;
         _coordinator = coordinator;
+        _tenantConfigProvider = tenantConfigProvider;
         _logger = logger;
     }
 
@@ -71,36 +74,28 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         // mutación de dominio
         resolutionTask.StartAnalysis();
 
-        // Simulamos las reglas de negocio extraídas desde el catálogo/políticas del Tenant (E5 reemplazará este fixture por BD)
-        string tenantPromptContext = """
-                                     Eres el sistema de decisiones de OMRO para el tenant configurado.
-                                     Tu objetivo es seleccionar acciones exclusivamente desde el catálogo autorizado según score y atributos genéricos del evento.
-                                     NOTA: Solo recibes anomalías operativas relevantes (RiskProbability >= 0.50).
+        var tenantConfig = await _tenantConfigProvider.GetTenantConfigurationAsync(request.TenantId, cancellationToken);
+        if (tenantConfig is null || !tenantConfig.IsActive)
+        {
+            var reason = tenantConfig is null
+                ? $"Tenant '{request.TenantId}' no tiene configuración registrada en OMRO."
+                : $"Tenant '{request.TenantId}' ({tenantConfig.TenantSlug}) está inactivo.";
 
-                                     REGLAS DE DECISIÓN DEL TENANT:
-                                     1. SI `final_notification_delivered` == "false":
-                                     - Prohibido ejecutar acción autónoma sobre el cupo. Deriva a propuesta HITL de monitoreo manual.
-                                     - ExpectsExternalApproval: true
-                                     - ActionType: "PROPOSE_RESOLUTION"
-                                     - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/resolutions/propose"
-                                     - Payload: { "resourceId": "<ResourceId>", "riskProbability": <RiskProbability>, "aiPlanJson": "{\"DeferredActions\":[{\"Endpoint\":\"https://medcare-cqrs-clinical-api.onrender.com/api/appointments/monitor\",\"Payload\":{\"resourceId\":\"<ResourceId>\",\"requiresAction\":true,\"reason\":\"Confirmación previa requerida no entregada\"}}]}" }
+            _logger.LogWarning(
+                "[OMRO FAIL-CLOSED] Escalando anomalía {AnomalyType} para recurso {ResourceId} sin orquestación: {Reason}",
+                request.AnomalyType,
+                request.ResourceId,
+                reason);
 
-                                     2. SI `RiskProbability` >= 0.85 AND `auto_overbook_enabled` == "true" AND `final_notification_delivered` == "true" AND `clinical_exclusion` != "true":
-                                     - Autoriza ejecución autónoma inmediata desde el catálogo del tenant.
-                                     - ExpectsExternalApproval: false
-                                     - ActionType: "GENERATE_OVERBOOK"
-                                     - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/appointments/overbook"
-                                     - Payload: { "resourceId": "<ResourceId>", "reason": "Automated decision from risk threshold and event attributes", "correlationId": "<CorrelationId>", "decisionMode": "Autonomous" }
+            resolutionTask.MarkNeedsHumanReview(reason);
+            _repository.Add(resolutionTask);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            return resolutionTask.Id;
+        }
 
-                                     3. EN CUALQUIER OTRO CASO (0.50 <= RiskProbability < 0.85, o `clinical_exclusion` == "true", o `auto_overbook_enabled` != "true" en modo sombra):
-                                     - Envía una propuesta HITL para aprobación humana externa.
-                                     - ExpectsExternalApproval: true
-                                     - ActionType: "PROPOSE_RESOLUTION"
-                                     - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/resolutions/propose"
-                                     - Payload: { "resourceId": "<ResourceId>", "riskProbability": <RiskProbability>, "aiPlanJson": "{\"DeferredActions\":[{\"Endpoint\":\"https://medcare-cqrs-clinical-api.onrender.com/api/appointments/overbook\",\"Payload\":{\"resourceId\":\"<ResourceId>\",\"reason\":\"Approved HITL action\",\"correlationId\":\"<CorrelationId>\",\"decisionMode\":\"Approved\"}}]}" }
-                                     """;
+        string tenantPromptContext = tenantConfig.BuildOrchestratorPromptContext(request.AnomalyType);
 
-        // razonamiento cognitivo: el modelo asume el control con atributos agnósticos del evento
+        // razonamiento cognitivo: el modelo asume el control con contexto del tenant desde BD y atributos agnósticos del evento
         var (plan, promptTokens, completionTokens) = request.Attributes is { Count: > 0 }
             ? await _orchestrator.ProposeResolutionAsync(
                 anomalyEvent,

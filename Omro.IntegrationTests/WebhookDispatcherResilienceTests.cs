@@ -13,11 +13,14 @@ using Omro.Contracts.Events;
 using Omro.Domain.Messaging;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
+using Omro.Domain.Tenants;
+using Omro.Infrastructure.Configuration;
 using Omro.Infrastructure.HttpClients;
 using Omro.Infrastructure.Messaging.Configuration;
 using Omro.Infrastructure.Messaging.Observers;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
+using Omro.Infrastructure.Tenants;
 using Omro.Worker.Consumers;
 
 namespace Omro.IntegrationTests;
@@ -185,11 +188,16 @@ public class WebhookDispatcherResilienceTests
 
         services.AddDbContext<ApplicationDbContext>(o =>
             o.UseInMemoryDatabase(dbName).UseInternalServiceProvider(inMemoryProvider));
+        services.AddMemoryCache();
+        services.Configure<TenantCacheOptions>(_ => { });
         services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
         services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
+        services.AddScoped<ITenantConfigRepository, TenantConfigRepository>();
+        services.AddScoped<IShadowDecisionRepository, ShadowDecisionRepository>();
         services.AddScoped<IActionExecutionCoordinator, ActionExecutionCoordinator>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
         services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
+        services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
 
         var webhookMock = new Moq.Mock<IWebhookDispatcher>();
         webhookMock
@@ -257,9 +265,22 @@ public class WebhookDispatcherResilienceTests
 
         try
         {
+            var tenantId = Guid.NewGuid();
+            using (var seedScope = provider.CreateScope())
+            {
+                var seedDb = seedScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                seedDb.TenantConfigs.Add(TenantConfig.Create(
+                    tenantId,
+                    $"tenant-{tenantId:N}",
+                    "Test Tenant",
+                    "Prompt context",
+                    "tenant-api"));
+                await seedDb.SaveChangesAsync();
+            }
+
             var anomalyMsgId = Guid.NewGuid();
             var anomaly = new AnomalyDetected(
-                Guid.NewGuid(),
+                tenantId,
                 Guid.NewGuid(),
                 "AppointmentNoShowRisk",
                 Guid.NewGuid(),

@@ -12,11 +12,14 @@ using Omro.Application.ResolutionTasks.Services;
 using Omro.Contracts.Events;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
+using Omro.Domain.Tenants;
+using Omro.Infrastructure.Configuration;
 using Omro.Infrastructure.HttpClients;
 using Omro.Infrastructure.Messaging.Configuration;
 using Omro.Infrastructure.Messaging.Observers;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
+using Omro.Infrastructure.Tenants;
 using Omro.Worker.Consumers;
 
 namespace Omro.IntegrationTests;
@@ -43,10 +46,12 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             ExpectsExternalApproval: false));
 
         await using var ctx = await LifecycleTestHost.CreateAsync(handler, orchestrator);
+        var tenantId = Guid.NewGuid();
+        await ctx.SeedTenantAsync(tenantId);
         var resourceId = Guid.NewGuid();
 
         await ctx.Harness.Bus.Publish(new AnomalyDetected(
-            TenantId: Guid.NewGuid(),
+            TenantId: tenantId,
             CorrelationId: Guid.NewGuid(),
             AnomalyType: "AppointmentNoShowRisk",
             ResourceId: resourceId,
@@ -95,10 +100,12 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             ]));
 
         await using var ctx = await LifecycleTestHost.CreateAsync(handler, orchestrator, retryLimit: 3);
+        var tenantId = Guid.NewGuid();
+        await ctx.SeedTenantAsync(tenantId);
         var resourceId = Guid.NewGuid();
 
         await ctx.Harness.Bus.Publish(new AnomalyDetected(
-            TenantId: Guid.NewGuid(),
+            TenantId: tenantId,
             CorrelationId: Guid.NewGuid(),
             AnomalyType: "AppointmentNoShowRisk",
             ResourceId: resourceId,
@@ -138,6 +145,7 @@ public class ResolutionLifecycleAndCrashRecoveryTests
         await using var ctx = await LifecycleTestHost.CreateAsync(handler, orchestrator);
 
         var tenantId = Guid.NewGuid();
+        await ctx.SeedTenantAsync(tenantId);
         var resourceId = Guid.NewGuid();
         Guid taskId;
         string action1Key;
@@ -217,6 +225,7 @@ public class ResolutionLifecycleAndCrashRecoveryTests
         await using var ctx = await LifecycleTestHost.CreateAsync(handler, orchestrator);
 
         var tenantId = Guid.NewGuid();
+        await ctx.SeedTenantAsync(tenantId);
         var resourceId = Guid.NewGuid();
 
         await ctx.Harness.Bus.Publish(new AnomalyDetected(
@@ -297,10 +306,12 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             ]));
 
         await using var ctx = await LifecycleTestHost.CreateAsync(handler, orchestrator, retryLimit: 2, pollyRetries: 1);
+        var tenantId = Guid.NewGuid();
+        await ctx.SeedTenantAsync(tenantId);
         var resourceId = Guid.NewGuid();
 
         await ctx.Harness.Bus.Publish(new AnomalyDetected(
-            TenantId: Guid.NewGuid(),
+            TenantId: tenantId,
             CorrelationId: Guid.NewGuid(),
             AnomalyType: "AppointmentNoShowRisk",
             ResourceId: resourceId,
@@ -365,11 +376,16 @@ public class ResolutionLifecycleAndCrashRecoveryTests
 
             services.AddDbContext<ApplicationDbContext>(o =>
                 o.UseInMemoryDatabase(dbName).UseInternalServiceProvider(inMemoryProvider));
+            services.AddMemoryCache();
+            services.Configure<TenantCacheOptions>(_ => { });
             services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
             services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
+            services.AddScoped<ITenantConfigRepository, TenantConfigRepository>();
+            services.AddScoped<IShadowDecisionRepository, ShadowDecisionRepository>();
             services.AddScoped<IActionExecutionCoordinator, ActionExecutionCoordinator>();
             services.AddScoped<IUnitOfWork, UnitOfWork>();
             services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
+            services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
             services.AddSingleton(orchestrator);
 
             services.AddResilientWebhookHttpClient(
@@ -418,6 +434,22 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             await harness.Start();
 
             return new LifecycleTestHost(provider, harness);
+        }
+
+        public async Task SeedTenantAsync(Guid tenantId)
+        {
+            using var scope = Provider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            if (await db.TenantConfigs.AnyAsync(t => t.TenantId == tenantId))
+                return;
+
+            db.TenantConfigs.Add(TenantConfig.Create(
+                tenantId,
+                $"tenant-{tenantId:N}",
+                "Test Tenant",
+                "Test prompt context",
+                "tenant-api"));
+            await db.SaveChangesAsync();
         }
 
         public async Task<ResolutionTask?> WaitForTaskAsync(Func<ResolutionTask, bool> predicate, int timeoutSeconds = 10)

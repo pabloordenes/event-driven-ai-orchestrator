@@ -185,6 +185,399 @@ namespace Omro.Infrastructure.Migrations
                     b.ToTable("RESOLUTION_TASK", "omro");
                 });
 
+            modelBuilder.Entity("Omro.Domain.ResolutionTasks.ShadowDecision", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("ActualActionType")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("actual_action_type");
+
+                    b.Property<string>("AnomalyType")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("anomaly_type");
+
+                    b.Property<Guid>("CorrelationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("correlation_id");
+
+                    b.Property<DateTimeOffset>("EvaluatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("evaluated_at");
+
+                    b.Property<string>("EvaluationSnapshotJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("evaluation_snapshot_json");
+
+                    b.Property<string>("IntendedActionType")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("intended_action_type");
+
+                    b.Property<string>("MatchedRuleId")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("matched_rule_id");
+
+                    b.Property<Guid>("PolicyId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("policy_id");
+
+                    b.Property<int>("PolicyVersion")
+                        .HasColumnType("integer")
+                        .HasColumnName("policy_version");
+
+                    b.Property<Guid>("ResolutionTaskId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("resolution_task_id");
+
+                    b.Property<Guid>("ResourceId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("resource_id");
+
+                    b.Property<decimal>("RiskProbability")
+                        .HasColumnType("numeric(18,4)")
+                        .HasColumnName("risk_probability");
+
+                    b.Property<string>("SuppressionReason")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("suppression_reason");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("tenant_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ResolutionTaskId", "MatchedRuleId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_shadow_decisions_task_rule");
+
+                    b.HasIndex("TenantId", "EvaluatedAt")
+                        .HasDatabaseName("IX_shadow_decisions_tenant_evaluated_at");
+
+                    b.ToTable("shadow_decisions", "omro");
+                });
+
+            modelBuilder.Entity("Omro.Domain.Tenants.TenantAction", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("ActionType")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("action_type");
+
+                    b.Property<string>("AllowedPhases")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("allowed_phases");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("DefaultPayloadTemplateJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("default_payload_template_json");
+
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("description");
+
+                    b.Property<string>("EndpointUrl")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("endpoint_url");
+
+                    b.Property<string>("HttpMethod")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)")
+                        .HasDefaultValue("POST")
+                        .HasColumnName("http_method");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_active");
+
+                    b.Property<string>("LlmEditableFieldsJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("jsonb")
+                        .HasDefaultValue("[]")
+                        .HasColumnName("llm_editable_fields_json");
+
+                    b.Property<string>("PayloadSchemaJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("payload_schema_json");
+
+                    b.Property<bool>("RequiresApproval")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("requires_approval");
+
+                    b.Property<string>("RetryPolicyJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("jsonb")
+                        .HasDefaultValue("{}")
+                        .HasColumnName("retry_policy_json");
+
+                    b.Property<int>("SchemaVersion")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("schema_version");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("tenant_id");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "ActionType")
+                        .IsUnique()
+                        .HasDatabaseName("IX_tenant_actions_tenant_action_type");
+
+                    b.HasIndex("TenantId", "IsActive")
+                        .HasDatabaseName("IX_tenant_actions_tenant_active");
+
+                    b.ToTable("tenant_actions", "omro");
+                });
+
+            modelBuilder.Entity("Omro.Domain.Tenants.TenantConfig", b =>
+                {
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("tenant_id");
+
+                    b.Property<string>("AllowedEndpointHostsJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("jsonb")
+                        .HasDefaultValue("[]")
+                        .HasColumnName("allowed_endpoint_hosts_json");
+
+                    b.Property<string>("AuthAudience")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)")
+                        .HasColumnName("auth_audience");
+
+                    b.Property<string>("AuthIssuer")
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)")
+                        .HasColumnName("auth_issuer");
+
+                    b.Property<string>("AuthRole")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)")
+                        .HasDefaultValue("omro_service")
+                        .HasColumnName("auth_role");
+
+                    b.Property<string>("AuthScheme")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("Rs256Jwt")
+                        .HasColumnName("auth_scheme");
+
+                    b.Property<bool>("AutonomousExecutionEnabled")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("autonomous_execution_enabled");
+
+                    b.Property<string>("BasePromptContext")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("base_prompt_context");
+
+                    b.Property<int>("ConfigVersion")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("config_version");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<int>("DedupWindowMinutes")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(60)
+                        .HasColumnName("dedup_window_minutes");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)")
+                        .HasColumnName("display_name");
+
+                    b.Property<int>("EgressTimeoutSeconds")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(15)
+                        .HasColumnName("egress_timeout_seconds");
+
+                    b.Property<string>("FeatureFlagsJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("jsonb")
+                        .HasDefaultValue("{}")
+                        .HasColumnName("feature_flags_json");
+
+                    b.Property<int>("HitlProposalMinLeadMinutes")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(60)
+                        .HasColumnName("hitl_proposal_min_lead_minutes");
+
+                    b.Property<int>("HitlProposalTtlMinutes")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(180)
+                        .HasColumnName("hitl_proposal_ttl_minutes");
+
+                    b.Property<string>("HmacSecretRef")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("hmac_secret_ref");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_active");
+
+                    b.Property<string>("LlmConfigJson")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("jsonb")
+                        .HasDefaultValue("{}")
+                        .HasColumnName("llm_config_json");
+
+                    b.Property<int>("MaxPayloadBytes")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(65536)
+                        .HasColumnName("max_payload_bytes");
+
+                    b.Property<string>("SigningKeyKid")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("signing_key_kid");
+
+                    b.Property<string>("SigningKeyRef")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("signing_key_ref");
+
+                    b.Property<string>("TenantSlug")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)")
+                        .HasColumnName("tenant_slug");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("TenantId");
+
+                    b.HasIndex("TenantSlug")
+                        .IsUnique()
+                        .HasDatabaseName("IX_tenant_config_slug");
+
+                    b.ToTable("tenant_config", "omro");
+                });
+
+            modelBuilder.Entity("Omro.Domain.Tenants.TenantPolicy", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("AnomalyType")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("anomaly_type");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("DecisionTableJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("decision_table_json");
+
+                    b.Property<int?>("DedupWindowMinutes")
+                        .HasColumnType("integer")
+                        .HasColumnName("dedup_window_minutes");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_active");
+
+                    b.Property<int>("PolicyVersion")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("policy_version");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("tenant_id");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "AnomalyType")
+                        .IsUnique()
+                        .HasDatabaseName("IX_tenant_policies_active")
+                        .HasFilter("is_active = true");
+
+                    b.HasIndex("TenantId", "AnomalyType", "PolicyVersion")
+                        .IsUnique()
+                        .HasDatabaseName("IX_tenant_policies_tenant_anomaly_version");
+
+                    b.ToTable("tenant_policies", "omro");
+                });
+
             modelBuilder.Entity("Omro.Domain.ResolutionTasks.ActionExecution", b =>
                 {
                     b.HasOne("Omro.Domain.ResolutionTasks.ResolutionTask", null)
@@ -258,7 +651,7 @@ namespace Omro.Infrastructure.Migrations
                                 .ValueGeneratedOnAdd()
                                 .HasMaxLength(100)
                                 .HasColumnType("character varying(100)")
-                                .HasDefaultValue("AppointmentNoShowRisk")
+                                .HasDefaultValue("GenericAnomaly")
                                 .HasColumnName("anomaly_type");
 
                             b1.Property<Guid>("CorrelationId")
@@ -287,9 +680,49 @@ namespace Omro.Infrastructure.Migrations
                     b.Navigation("ReasoningTraces");
                 });
 
+            modelBuilder.Entity("Omro.Domain.ResolutionTasks.ShadowDecision", b =>
+                {
+                    b.HasOne("Omro.Domain.ResolutionTasks.ResolutionTask", null)
+                        .WithMany()
+                        .HasForeignKey("ResolutionTaskId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Omro.Domain.Tenants.TenantConfig", null)
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Omro.Domain.Tenants.TenantAction", b =>
+                {
+                    b.HasOne("Omro.Domain.Tenants.TenantConfig", null)
+                        .WithMany("Actions")
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Omro.Domain.Tenants.TenantPolicy", b =>
+                {
+                    b.HasOne("Omro.Domain.Tenants.TenantConfig", null)
+                        .WithMany("Policies")
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("Omro.Domain.ResolutionTasks.ResolutionTask", b =>
                 {
                     b.Navigation("ActionExecutions");
+                });
+
+            modelBuilder.Entity("Omro.Domain.Tenants.TenantConfig", b =>
+                {
+                    b.Navigation("Actions");
+
+                    b.Navigation("Policies");
                 });
 #pragma warning restore 612, 618
         }
