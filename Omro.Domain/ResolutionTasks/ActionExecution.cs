@@ -8,6 +8,7 @@ public class ActionExecution
     public int ActionIndex { get; private set; }
     public string ActionType { get; private set; } = string.Empty;
     public string Endpoint { get; private set; } = string.Empty;
+    public string HttpMethod { get; private set; } = "POST";
     public string PayloadJson { get; private set; } = "{}";
     public string IdempotencyKey { get; private set; } = string.Empty;
     public ActionExecutionStatus Status { get; private set; }
@@ -27,7 +28,8 @@ public class ActionExecution
         string actionType,
         string endpoint,
         string payloadJson,
-        string idempotencyKey)
+        string idempotencyKey,
+        string httpMethod = "POST")
     {
         if (resolutionTaskId == Guid.Empty)
             throw new ArgumentException("ResolutionTaskId cannot be empty.", nameof(resolutionTaskId));
@@ -35,6 +37,7 @@ public class ActionExecution
             throw new ArgumentException("Endpoint cannot be empty.", nameof(endpoint));
 
         var now = DateTime.UtcNow;
+        var phaseCode = phase == ActionExecutionPhase.Immediate ? "i" : "d";
         return new ActionExecution
         {
             Id = Guid.NewGuid(),
@@ -43,9 +46,10 @@ public class ActionExecution
             ActionIndex = actionIndex,
             ActionType = string.IsNullOrWhiteSpace(actionType) ? "WEBHOOK" : actionType.Trim(),
             Endpoint = endpoint.Trim(),
+            HttpMethod = string.IsNullOrWhiteSpace(httpMethod) ? "POST" : httpMethod.Trim().ToUpperInvariant(),
             PayloadJson = string.IsNullOrWhiteSpace(payloadJson) ? "{}" : payloadJson,
             IdempotencyKey = string.IsNullOrWhiteSpace(idempotencyKey)
-                ? $"{resolutionTaskId}:{phase.ToString().ToLowerInvariant()}:{actionIndex}"
+                ? $"omro:{resolutionTaskId:N}:{phaseCode}:{actionIndex}"
                 : idempotencyKey,
             Status = ActionExecutionStatus.Pending,
             Attempts = 0,

@@ -206,6 +206,7 @@ public class WebhookDispatcherResilienceTests
         services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
         services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
         services.AddSingleton<IAiPlanContractParser, AiPlanContractParser>();
+        services.AddSingleton<IActionIdempotencyKeyGenerator, ActionIdempotencyKeyGenerator>();
 
         var webhookMock = new Moq.Mock<IWebhookDispatcher>();
         webhookMock

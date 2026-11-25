@@ -91,6 +91,13 @@ public sealed record TenantConfiguration(
             : null;
     }
 
+    public int ResolveDedupWindowMinutes(string anomalyType)
+    {
+        var policy = ResolvePolicy(anomalyType);
+        var minutes = policy?.DedupWindowMinutes ?? DedupWindowMinutes;
+        return Math.Max(0, minutes);
+    }
+
     public DateTimeOffset ComputeHitlProposalExpiresAt(
         DateTimeOffset utcNow,
         DateTimeOffset? resourceEventTimeUtc = null)

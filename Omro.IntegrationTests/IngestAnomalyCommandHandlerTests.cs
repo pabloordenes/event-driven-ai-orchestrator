@@ -55,6 +55,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
         services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
         services.AddSingleton<IAiPlanContractParser, AiPlanContractParser>();
+        services.AddSingleton<IActionIdempotencyKeyGenerator, ActionIdempotencyKeyGenerator>();
 
         _webhookMock = new Moq.Mock<IWebhookDispatcher>();
         _webhookMock
@@ -172,11 +173,20 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             .ToListAsync();
 
         tasks.Should().HaveCount(1);
+        var expectedKey = new ActionIdempotencyKeyGenerator().Generate(
+            tasks[0].Id,
+            ActionExecutionPhase.Immediate,
+            0,
+            "GENERATE_OVERBOOK",
+            "POST",
+            "https://medcare.test/api/appointments/overbook");
+        expectedKey.Length.Should().BeLessThanOrEqualTo(100);
+
         _webhookMock.Verify(w => w.DispatchAsync(
             "https://medcare.test/api/appointments/overbook",
             Moq.It.IsAny<Dictionary<string, object>>(),
             Moq.It.IsAny<CancellationToken>(),
-            $"{tasks[0].Id}:0",
+            expectedKey,
             Moq.It.IsAny<Guid?>()), Moq.Times.Once);
     }
 
@@ -210,11 +220,20 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             c => c.Context.Message.ResolutionTaskId == taskId);
         consumed.Should().BeTrue();
 
+        var expectedDeferredKey = new ActionIdempotencyKeyGenerator().Generate(
+            taskId,
+            ActionExecutionPhase.Deferred,
+            0,
+            "MONITOR_RESOURCE",
+            "POST",
+            "https://medcare.test/api/appointments/monitor");
+        expectedDeferredKey.Length.Should().BeLessThanOrEqualTo(100);
+
         _webhookMock.Verify(w => w.DispatchAsync(
             "https://medcare.test/api/appointments/monitor",
             Moq.It.IsAny<Dictionary<string, object>>(),
             Moq.It.IsAny<CancellationToken>(),
-            $"{taskId}:deferred:0",
+            expectedDeferredKey,
             Moq.It.IsAny<Guid?>()), Moq.Times.Once);
     }
 
@@ -305,11 +324,20 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         saved.Should().NotBeNull();
         saved!.Status.Should().Be(ResolutionStatus.Resolved);
         saved.ReasoningTraces.Should().Contain(t => t.StepType == "LlmUnavailableDeterministicFallback");
+        var expectedKey = new ActionIdempotencyKeyGenerator().Generate(
+            taskId,
+            ActionExecutionPhase.Immediate,
+            0,
+            "GENERATE_OVERBOOK",
+            "POST",
+            "https://medcare.test/api/appointments/overbook");
+        expectedKey.Length.Should().BeLessThanOrEqualTo(100);
+
         handlerMock.Verify(w => w.DispatchAsync(
             "https://medcare.test/api/appointments/overbook",
             Moq.It.IsAny<Dictionary<string, object>>(),
             Moq.It.IsAny<CancellationToken>(),
-            $"{taskId}:0",
+            expectedKey,
             taskId), Moq.Times.Once);
     }
 

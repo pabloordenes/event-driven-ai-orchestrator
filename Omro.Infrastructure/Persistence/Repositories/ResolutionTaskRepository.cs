@@ -33,11 +33,43 @@ public class ResolutionTaskRepository : IResolutionTaskRepository
     {
         return await _dbContext.ResolutionTasks
             .Include(t => t.ActionExecutions)
-            .FirstOrDefaultAsync(
-                t => t.TenantId == tenantId &&
-                     t.Anomaly.ResourceId == resourceId &&
-                     t.Anomaly.AnomalyType == anomalyType,
-                cancellationToken);
+            .Where(t => t.TenantId == tenantId &&
+                        t.Anomaly.ResourceId == resourceId &&
+                        t.Anomaly.AnomalyType == anomalyType)
+            .OrderByDescending(t => t.CreatedAt)
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
+    public async Task<ResolutionTask?> FindActiveOrWithinWindowAsync(
+        Guid tenantId,
+        Guid resourceId,
+        string anomalyType,
+        DateTime? windowStartUtc,
+        CancellationToken cancellationToken = default)
+    {
+        var query = _dbContext.ResolutionTasks
+            .Include(t => t.ActionExecutions)
+            .Where(t => t.TenantId == tenantId &&
+                        t.Anomaly.ResourceId == resourceId &&
+                        t.Anomaly.AnomalyType == anomalyType);
+
+        if (windowStartUtc.HasValue)
+        {
+            var cutoff = windowStartUtc.Value;
+            query = query.Where(t =>
+                (t.Status != ResolutionStatus.Resolved && t.Status != ResolutionStatus.Failed) ||
+                t.CreatedAt >= cutoff);
+        }
+        else
+        {
+            query = query.Where(t =>
+                t.Status != ResolutionStatus.Resolved && t.Status != ResolutionStatus.Failed);
+        }
+
+        return await query
+            .OrderByDescending(t => t.Status != ResolutionStatus.Resolved && t.Status != ResolutionStatus.Failed)
+            .ThenByDescending(t => t.CreatedAt)
+            .FirstOrDefaultAsync(cancellationToken);
     }
 
     public async Task<ResolutionTask?> GetLatestByTenantAndResourceAsync(

@@ -98,6 +98,12 @@ namespace Omro.Infrastructure.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("executed_at");
 
+                    b.Property<string>("HttpMethod")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("http_method");
+
                     b.Property<int?>("HttpStatus")
                         .HasColumnType("integer")
                         .HasColumnName("http_status");
@@ -134,6 +140,10 @@ namespace Omro.Infrastructure.Migrations
                         .HasColumnName("updated_at");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("IdempotencyKey")
+                        .IsUnique()
+                        .HasDatabaseName("IX_ACTION_EXECUTION_idempotency_key");
 
                     b.HasIndex("Status")
                         .HasDatabaseName("IX_ACTION_EXECUTION_status");
