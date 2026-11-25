@@ -6,17 +6,24 @@ using MassTransit.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Moq;
+using Omro.Application.Contracts;
 using Omro.Application.Interfaces;
+using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Application.ResolutionTasks.Services;
 using Omro.Contracts.Events;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
+using Omro.Domain.Tenants;
+using Omro.Infrastructure.Configuration;
 using Omro.Infrastructure.HttpClients;
 using Omro.Infrastructure.Messaging.Configuration;
 using Omro.Infrastructure.Messaging.Observers;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
+using Omro.Infrastructure.Security;
+using Omro.Infrastructure.Tenants;
+using Omro.Infrastructure.Validation;
 using Omro.Worker.Consumers;
 
 namespace Omro.IntegrationTests;
@@ -43,10 +50,12 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             ExpectsExternalApproval: false));
 
         await using var ctx = await LifecycleTestHost.CreateAsync(handler, orchestrator);
+        var tenantId = Guid.NewGuid();
+        await ctx.SeedTenantAsync(tenantId);
         var resourceId = Guid.NewGuid();
 
         await ctx.Harness.Bus.Publish(new AnomalyDetected(
-            TenantId: Guid.NewGuid(),
+            TenantId: tenantId,
             CorrelationId: Guid.NewGuid(),
             AnomalyType: "AppointmentNoShowRisk",
             ResourceId: resourceId,
@@ -95,10 +104,12 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             ]));
 
         await using var ctx = await LifecycleTestHost.CreateAsync(handler, orchestrator, retryLimit: 3);
+        var tenantId = Guid.NewGuid();
+        await ctx.SeedTenantAsync(tenantId);
         var resourceId = Guid.NewGuid();
 
         await ctx.Harness.Bus.Publish(new AnomalyDetected(
-            TenantId: Guid.NewGuid(),
+            TenantId: tenantId,
             CorrelationId: Guid.NewGuid(),
             AnomalyType: "AppointmentNoShowRisk",
             ResourceId: resourceId,
@@ -138,6 +149,7 @@ public class ResolutionLifecycleAndCrashRecoveryTests
         await using var ctx = await LifecycleTestHost.CreateAsync(handler, orchestrator);
 
         var tenantId = Guid.NewGuid();
+        await ctx.SeedTenantAsync(tenantId);
         var resourceId = Guid.NewGuid();
         Guid taskId;
         string action1Key;
@@ -217,6 +229,7 @@ public class ResolutionLifecycleAndCrashRecoveryTests
         await using var ctx = await LifecycleTestHost.CreateAsync(handler, orchestrator);
 
         var tenantId = Guid.NewGuid();
+        await ctx.SeedTenantAsync(tenantId);
         var resourceId = Guid.NewGuid();
 
         await ctx.Harness.Bus.Publish(new AnomalyDetected(
@@ -261,10 +274,20 @@ public class ResolutionLifecycleAndCrashRecoveryTests
         resolvedTask.ActionExecutions.Should().HaveCount(2);
         resolvedTask.ActionExecutions.Should().Contain(e =>
             e.Phase == ActionExecutionPhase.Immediate && e.Status == ActionExecutionStatus.Succeeded);
+
+        var expectedDeferredKey = new ActionIdempotencyKeyGenerator().Generate(
+            waitingTask.Id,
+            ActionExecutionPhase.Deferred,
+            0,
+            "MONITOR_RESOURCE",
+            "POST",
+            "https://tenant.test/api/appointments/monitor");
+        expectedDeferredKey.Length.Should().BeLessThanOrEqualTo(100);
+
         resolvedTask.ActionExecutions.Should().Contain(e =>
             e.Phase == ActionExecutionPhase.Deferred &&
             e.Status == ActionExecutionStatus.Succeeded &&
-            e.IdempotencyKey == $"{externalTaskId}:deferred:0");
+            e.IdempotencyKey == expectedDeferredKey);
 
         hitPaths.Should().Contain("/api/resolutions/propose");
         hitPaths.Should().Contain("/api/appointments/monitor");
@@ -297,10 +320,12 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             ]));
 
         await using var ctx = await LifecycleTestHost.CreateAsync(handler, orchestrator, retryLimit: 2, pollyRetries: 1);
+        var tenantId = Guid.NewGuid();
+        await ctx.SeedTenantAsync(tenantId);
         var resourceId = Guid.NewGuid();
 
         await ctx.Harness.Bus.Publish(new AnomalyDetected(
-            TenantId: Guid.NewGuid(),
+            TenantId: tenantId,
             CorrelationId: Guid.NewGuid(),
             AnomalyType: "AppointmentNoShowRisk",
             ResourceId: resourceId,
@@ -365,11 +390,29 @@ public class ResolutionLifecycleAndCrashRecoveryTests
 
             services.AddDbContext<ApplicationDbContext>(o =>
                 o.UseInMemoryDatabase(dbName).UseInternalServiceProvider(inMemoryProvider));
+            services.AddMemoryCache();
+            services.Configure<TenantCacheOptions>(_ => { });
+            services.Configure<PlanValidationOptions>(_ => { });
+            services.Configure<OmroServiceAuthOptions>(_ => { });
+            services.Configure<EgressSecurityOptions>(_ => { });
             services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
             services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
+            services.AddScoped<ITenantConfigRepository, TenantConfigRepository>();
+            services.AddScoped<IShadowDecisionRepository, ShadowDecisionRepository>();
             services.AddScoped<IActionExecutionCoordinator, ActionExecutionCoordinator>();
             services.AddScoped<IUnitOfWork, UnitOfWork>();
             services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
+            services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
+            services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
+            services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
+            services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
+            services.AddSingleton<IAiPlanContractParser, AiPlanContractParser>();
+            services.AddSingleton<IActionIdempotencyKeyGenerator, ActionIdempotencyKeyGenerator>();
+            services.AddSingleton<IOmroTokenService, OmroTokenService>();
+            services.AddSingleton<ISecretResolver, ConfigurationSecretResolver>();
+            services.AddSingleton<ITenantAuthSigner, TenantAuthSigner>();
+            services.AddSingleton<IDnsResolver, StubPublicDnsResolver>();
+            services.AddSingleton<ISsrfGuard, SsrfGuard>();
             services.AddSingleton(orchestrator);
 
             services.AddResilientWebhookHttpClient(
@@ -420,6 +463,83 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             return new LifecycleTestHost(provider, harness);
         }
 
+        public async Task SeedTenantAsync(Guid tenantId)
+        {
+            using var scope = Provider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            if (await db.TenantConfigs.AnyAsync(t => t.TenantId == tenantId))
+                return;
+
+            var tenant = TenantConfig.Create(
+                tenantId,
+                $"tenant-{tenantId:N}",
+                "Test Tenant",
+                "Test prompt context",
+                "tenant-api",
+                autonomousExecutionEnabled: true,
+                allowedEndpointHostsJson: "[\"https://tenant.test\"]");
+
+            tenant.AddAction(TenantAction.Create(
+                tenantId,
+                "GENERATE_OVERBOOK",
+                "Autonomous overbook",
+                "https://tenant.test/api/overbook",
+                defaultPayloadTemplateJson: "{\"resourceId\":\"{{resourceId}}\"}"));
+
+            tenant.AddAction(TenantAction.Create(
+                tenantId,
+                "PROPOSE_RESOLUTION",
+                "HITL proposal",
+                "https://tenant.test/api/resolutions/propose",
+                defaultPayloadTemplateJson: "{\"resourceId\":\"{{resourceId}}\"}",
+                requiresApproval: true,
+                allowedPhases: TenantActionPhase.Immediate));
+
+            tenant.AddAction(TenantAction.Create(
+                tenantId,
+                "MONITOR_RESOURCE",
+                "Deferred monitor",
+                "https://tenant.test/api/appointments/monitor",
+                defaultPayloadTemplateJson: "{\"requiresAction\":true}"));
+
+            tenant.AddPolicy(TenantPolicy.Create(
+                tenantId,
+                "AppointmentNoShowRisk",
+                """
+                {
+                  "hitPolicy": "FIRST_MATCH",
+                  "rules": [
+                    {
+                      "ruleId": "high-risk-auto",
+                      "priority": 10,
+                      "when": { "field": "riskProbability", "op": "gte", "value": 0.85 },
+                      "then": {
+                        "outcome": "ExecuteActions",
+                        "expectsExternalApproval": false,
+                        "invokeLlmEnrichment": true,
+                        "actions": [{ "actionType": "GENERATE_OVERBOOK" }]
+                      }
+                    },
+                    {
+                      "ruleId": "moderate-risk-hitl",
+                      "priority": 20,
+                      "when": { "field": "riskProbability", "op": "range_half_open", "minInclusive": 0.50, "maxExclusive": 0.85 },
+                      "then": {
+                        "outcome": "ProposeForApproval",
+                        "expectsExternalApproval": true,
+                        "invokeLlmEnrichment": true,
+                        "actions": [{ "actionType": "PROPOSE_RESOLUTION" }]
+                      }
+                    }
+                  ],
+                  "defaultDecision": { "outcome": "NoAction", "invokeLlmEnrichment": false, "actions": [] }
+                }
+                """));
+
+            db.TenantConfigs.Add(tenant);
+            await db.SaveChangesAsync();
+        }
+
         public async Task<ResolutionTask?> WaitForTaskAsync(Func<ResolutionTask, bool> predicate, int timeoutSeconds = 10)
         {
             var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
@@ -447,5 +567,11 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             await Harness.Stop();
             await Provider.DisposeAsync();
         }
+    }
+
+    private sealed class StubPublicDnsResolver : IDnsResolver
+    {
+        public Task<IPAddress[]> GetHostAddressesAsync(string host, CancellationToken cancellationToken = default)
+            => Task.FromResult(new[] { IPAddress.Parse("93.184.216.34") });
     }
 }

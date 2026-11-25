@@ -26,6 +26,9 @@ public class ResolutionTaskConfiguration : IEntityTypeConfiguration<ResolutionTa
             .HasDefaultValue(false)
             .IsRequired();
 
+        builder.Property(t => t.ProposalExpiresAt)
+            .HasColumnName("proposal_expires_at");
+
         builder.Property(t => t.CreatedAt).IsRequired();
         builder.Property(t => t.UpdatedAt).IsRequired();
 
@@ -51,7 +54,7 @@ public class ResolutionTaskConfiguration : IEntityTypeConfiguration<ResolutionTa
             a.Property(p => p.AnomalyType)
                 .HasColumnName("anomaly_type")
                 .HasMaxLength(100)
-                .HasDefaultValue("AppointmentNoShowRisk")
+                .HasDefaultValue("GenericAnomaly")
                 .IsRequired();
 
             a.Property(p => p.CorrelationId)
@@ -63,6 +66,7 @@ public class ResolutionTaskConfiguration : IEntityTypeConfiguration<ResolutionTa
         {
             rt.ToTable("AGENT_REASONING_TRACE");
             rt.HasKey(t => t.Id);
+            rt.Property(t => t.Id).ValueGeneratedNever();
             
             rt.Property(t => t.AgentName).HasColumnName("agent_name").HasMaxLength(100).IsRequired();
             rt.Property(t => t.StepType).HasColumnName("step_type").HasMaxLength(50).IsRequired();

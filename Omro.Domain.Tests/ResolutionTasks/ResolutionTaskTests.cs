@@ -118,4 +118,28 @@ public class ResolutionTaskTests
         ((Action)(() => resolvedTask.Fail("Cannot fail after resolved"))).Should().Throw<InvalidOperationException>();
         ((Action)(() => resolvedTask.Resolve("Double resolve"))).Should().Throw<InvalidOperationException>();
     }
+
+    [Fact]
+    public void ProposePlan_ShouldPersistProposalExpiresAtOnlyWhenExpectsExternalApprovalIsTrue()
+    {
+        var expiresAt = new DateTimeOffset(2026, 11, 25, 20, 0, 0, TimeSpan.Zero);
+
+        var hitlTask = new ResolutionTask(Guid.NewGuid(), new AnomalyEvent(0.70m, Guid.NewGuid()));
+        hitlTask.StartAnalysis();
+        hitlTask.ProposePlan(
+            new CognitivePlan("HITL", "Reason", 0.9m, [], ExpectsExternalApproval: true),
+            10,
+            20,
+            proposalExpiresAt: expiresAt);
+        hitlTask.ProposalExpiresAt.Should().Be(expiresAt);
+
+        var autoTask = new ResolutionTask(Guid.NewGuid(), new AnomalyEvent(0.92m, Guid.NewGuid()));
+        autoTask.StartAnalysis();
+        autoTask.ProposePlan(
+            new CognitivePlan("Auto", "Reason", 0.95m, [], ExpectsExternalApproval: false),
+            10,
+            20,
+            proposalExpiresAt: expiresAt);
+        autoTask.ProposalExpiresAt.Should().BeNull();
+    }
 }

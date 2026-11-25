@@ -37,6 +37,11 @@ public class ActionExecutionConfiguration : IEntityTypeConfiguration<ActionExecu
             .HasMaxLength(1000)
             .IsRequired();
 
+        builder.Property(x => x.HttpMethod)
+            .HasColumnName("http_method")
+            .HasMaxLength(16)
+            .IsRequired();
+
         builder.Property(x => x.PayloadJson)
             .HasColumnName("payload_json")
             .HasColumnType("jsonb")
@@ -81,6 +86,10 @@ public class ActionExecutionConfiguration : IEntityTypeConfiguration<ActionExecu
 
         builder.HasIndex(x => x.Status)
             .HasDatabaseName("IX_ACTION_EXECUTION_status");
+
+        builder.HasIndex(x => x.IdempotencyKey)
+            .HasDatabaseName("IX_ACTION_EXECUTION_idempotency_key")
+            .IsUnique();
 
         builder.HasOne<ResolutionTask>()
             .WithMany(t => t.ActionExecutions)

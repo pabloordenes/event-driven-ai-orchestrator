@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Omro.Application.Common.Exceptions;
 using Omro.Application.Interfaces;
 using Omro.Application.ResolutionTasks.Services;
+using Omro.Application.Validation;
 using Omro.Contracts.Events;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
@@ -17,6 +18,10 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
     private readonly IActionExecutionRepository _actionExecutionRepository;
     private readonly IUnitOfWork _unitOfWork;
     private readonly IActionExecutionCoordinator _coordinator;
+    private readonly ITenantConfigProvider _tenantConfigProvider;
+    private readonly IPlanValidator _planValidator;
+    private readonly IAiPlanContractParser _planParser;
+    private readonly IActionIdempotencyKeyGenerator _idempotencyKeyGenerator;
     private readonly ILogger<ResolutionApprovedConsumer> _logger;
 
     public ResolutionApprovedConsumer(
@@ -25,6 +30,10 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
         IActionExecutionRepository actionExecutionRepository,
         IUnitOfWork unitOfWork,
         IActionExecutionCoordinator coordinator,
+        ITenantConfigProvider tenantConfigProvider,
+        IPlanValidator planValidator,
+        IAiPlanContractParser planParser,
+        IActionIdempotencyKeyGenerator idempotencyKeyGenerator,
         ILogger<ResolutionApprovedConsumer> logger)
     {
         _webhookDispatcher = webhookDispatcher;
@@ -32,6 +41,10 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
         _actionExecutionRepository = actionExecutionRepository;
         _unitOfWork = unitOfWork;
         _coordinator = coordinator;
+        _tenantConfigProvider = tenantConfigProvider;
+        _planValidator = planValidator;
+        _planParser = planParser;
+        _idempotencyKeyGenerator = idempotencyKeyGenerator;
         _logger = logger;
     }
 
@@ -41,32 +54,77 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
         var cancellationToken = context.CancellationToken;
 
         _logger.LogInformation(
-            "OMRO: Aprobación HITL recibida para tarea {TaskId}, recurso {ResourceId}. Buscando acciones diferidas...",
+            "OMRO: Aprobación HITL recibida para tarea {TaskId}, recurso {ResourceId} (SchemaVersion={SchemaVersion}). Parseando contrato...",
             message.ResolutionTaskId,
-            message.ResourceId);
+            message.ResourceId,
+            message.SchemaVersion);
 
-        var plan = JsonSerializer.Deserialize<DeferredPlanDto>(
-            message.AiPlanJson,
-            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        var parseResult = _planParser.Parse(message);
 
-        var existingTask = await _taskRepository.GetByIdAsync(message.ResolutionTaskId, cancellationToken)
-                           ?? await _taskRepository.GetLatestByTenantAndResourceAsync(
-                               message.TenantId,
-                               message.ResourceId,
-                               cancellationToken);
-
-        if (existingTask is not null)
+        ResolutionTask? existingTask = null;
+        if (parseResult.IsSuccess &&
+            parseResult.Plan?.OmroTaskId is Guid omroTaskId &&
+            omroTaskId != Guid.Empty)
         {
-            if (existingTask.Status is ResolutionStatus.Resolved or ResolutionStatus.Failed)
-            {
-                _logger.LogInformation(
-                    "OMRO: ResolutionTask {TaskId} ya está en estado terminal {Status}. Se ignora aprobación duplicada.",
-                    existingTask.Id,
-                    existingTask.Status);
-                return;
-            }
+            existingTask = await _taskRepository.GetByIdAsync(omroTaskId, cancellationToken);
+        }
 
-            if (plan?.DeferredActions is null || plan.DeferredActions.Count == 0)
+        existingTask ??= await _taskRepository.GetByIdAsync(message.ResolutionTaskId, cancellationToken)
+                         ?? await _taskRepository.GetLatestByTenantAndResourceAsync(
+                             message.TenantId,
+                             message.ResourceId,
+                             cancellationToken);
+
+        if (existingTask is not null && existingTask.Status is ResolutionStatus.Resolved or ResolutionStatus.Failed)
+        {
+            _logger.LogInformation(
+                "OMRO: ResolutionTask {TaskId} ya está en estado terminal {Status}. Se ignora aprobación duplicada.",
+                existingTask.Id,
+                existingTask.Status);
+            return;
+        }
+
+        if (!parseResult.IsSuccess || parseResult.Plan is null)
+        {
+            var metadataJson = JsonSerializer.Serialize(new
+            {
+                errorCode = parseResult.ErrorCode,
+                errorMessage = parseResult.ErrorMessage,
+                schemaVersion = message.SchemaVersion
+            });
+
+            await HandleInvalidDeferredPlanAsync(
+                existingTask,
+                $"[{parseResult.ErrorCode}] {parseResult.ErrorMessage}",
+                metadataJson,
+                cancellationToken,
+                stepType: "PlanContractParseFailed");
+            return;
+        }
+
+        var parsedPlan = parseResult.Plan;
+
+        _logger.LogInformation(
+            "OMRO: Plan aprobado parseado para tarea {TaskId}, recurso {ResourceId}. ContractVersion={ContractVersion}, IsLegacyFormat={IsLegacyFormat}, DeferredActions={Count}.",
+            existingTask?.Id ?? message.ResolutionTaskId,
+            message.ResourceId,
+            parsedPlan.SchemaVersion,
+            parsedPlan.IsLegacyFormat,
+            parsedPlan.DeferredActions.Count);
+
+        var effectiveExpiresAt = parsedPlan.ProposalExpiresAt ?? existingTask?.ProposalExpiresAt;
+        if (effectiveExpiresAt.HasValue && effectiveExpiresAt.Value < DateTimeOffset.UtcNow)
+        {
+            _logger.LogWarning(
+                "OMRO: Aprobación HITL tardía para tarea {TaskId}, recurso {ResourceId}. ProposalExpiresAt={ProposalExpiresAt} ya había vencido, pero se permite ejecución explícita aprobada.",
+                existingTask?.Id ?? message.ResolutionTaskId,
+                message.ResourceId,
+                effectiveExpiresAt.Value);
+        }
+
+        if (parsedPlan.DeferredActions.Count == 0)
+        {
+            if (existingTask is not null)
             {
                 _logger.LogWarning(
                     "OMRO: Aprobación sin DeferredActions para tarea {TaskId}. Marcando Resolved.",
@@ -76,10 +134,44 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
                 return;
             }
 
-            var deferredSpecs = plan.DeferredActions.Select((action, index) => (
+            _logger.LogWarning(
+                "OMRO: Se recibió aprobación para {TaskId} pero no había DeferredActions en el contrato.",
+                message.ResolutionTaskId);
+            return;
+        }
+
+        var tenantConfig = await _tenantConfigProvider.GetTenantConfigurationAsync(message.TenantId, cancellationToken);
+        if (tenantConfig is null || !tenantConfig.IsActive)
+        {
+            var reason = tenantConfig is null
+                ? $"Tenant '{message.TenantId}' no tiene configuración registrada en OMRO para validar acciones diferidas."
+                : $"Tenant '{message.TenantId}' ({tenantConfig.TenantSlug}) está inactivo.";
+
+            await HandleInvalidDeferredPlanAsync(existingTask, reason, metadataJson: null, cancellationToken);
+            return;
+        }
+
+        var validation = _planValidator.ValidateDeferredActions(tenantConfig, parsedPlan.DeferredActions);
+        if (!validation.IsValid)
+        {
+            await HandleInvalidDeferredPlanAsync(existingTask, validation.Summary, validation.ToAuditJson(), cancellationToken);
+            return;
+        }
+
+        if (existingTask is not null)
+        {
+            var deferredSpecs = validation.ValidatedActions.Select((action, index) => (
+                action.ActionType,
                 action.Endpoint,
-                JsonSerializer.Serialize(action.Payload ?? new Dictionary<string, object>()),
-                $"{message.ResolutionTaskId}:deferred:{index}"
+                action.HttpMethod,
+                action.PayloadJson,
+                _idempotencyKeyGenerator.Generate(
+                    existingTask.Id,
+                    ActionExecutionPhase.Deferred,
+                    index,
+                    action.ActionType,
+                    action.HttpMethod,
+                    action.Endpoint)
             ));
 
             var addedExecutions = existingTask.RegisterDeferredActions(deferredSpecs);
@@ -93,33 +185,36 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
             return;
         }
 
-        if (plan?.DeferredActions is null || plan.DeferredActions.Count == 0)
-        {
-            _logger.LogWarning(
-                "OMRO: Se recibió aprobación para {TaskId} pero no había DeferredActions en el JSON.",
-                message.ResolutionTaskId);
-            return;
-        }
-
         // Fallback cuando el ResolutionApproved no tiene tarea vinculada en OMRO
-        for (int i = 0; i < plan.DeferredActions.Count; i++)
+        for (int i = 0; i < validation.ValidatedActions.Count; i++)
         {
-            var action = plan.DeferredActions[i];
-            if (string.IsNullOrWhiteSpace(action.Endpoint))
-                continue;
+            var action = validation.ValidatedActions[i];
+            var payloadDict = JsonSerializer.Deserialize<Dictionary<string, object>>(action.PayloadJson)
+                              ?? new Dictionary<string, object>();
 
-            var idempotencyKey = $"{message.ResolutionTaskId}:deferred:{i}";
+            var idempotencyKey = _idempotencyKeyGenerator.Generate(
+                message.ResolutionTaskId,
+                ActionExecutionPhase.Deferred,
+                i,
+                action.ActionType,
+                action.HttpMethod,
+                action.Endpoint);
             _logger.LogInformation(
-                "OMRO: Ejecutando Acción Diferida hacia {Endpoint} (Idempotency-Key: {IdempotencyKey})",
+                "OMRO: Ejecutando Acción Diferida validada {ActionType} hacia {Endpoint} (Idempotency-Key: {IdempotencyKey})",
+                action.ActionType,
                 action.Endpoint,
                 idempotencyKey);
 
             var result = await _webhookDispatcher.DispatchAsync(
                 action.Endpoint,
-                action.Payload ?? new Dictionary<string, object>(),
+                payloadDict,
                 cancellationToken,
                 idempotencyKey,
-                message.ResolutionTaskId);
+                message.ResolutionTaskId,
+                new WebhookDispatchOptions(
+                    TenantId: message.TenantId,
+                    HttpMethod: action.HttpMethod,
+                    ActionType: action.ActionType));
 
             if (!result.IsSuccess)
             {
@@ -137,6 +232,34 @@ public class ResolutionApprovedConsumer : IConsumer<ResolutionApproved>
         }
     }
 
-    private record DeferredPlanDto(List<WebhookActionDto> DeferredActions);
-    private record WebhookActionDto(string Endpoint, Dictionary<string, object> Payload);
+    private async Task HandleInvalidDeferredPlanAsync(
+        ResolutionTask? existingTask,
+        string reason,
+        string? metadataJson,
+        CancellationToken cancellationToken,
+        string stepType = "PlanValidationFailed")
+    {
+        _logger.LogError("[OMRO DEFERRED PLAN REJECTED] ({StepType}) {Reason}", stepType, reason);
+
+        if (existingTask is not null)
+        {
+            if (existingTask.Status == ResolutionStatus.NeedsHumanReview)
+            {
+                existingTask.RecordTrace("PlanValidator", stepType, reason, metadataJson);
+            }
+            else
+            {
+                existingTask.MarkNeedsHumanReview(
+                    reason,
+                    agentName: "PlanValidator",
+                    stepType: stepType,
+                    metadataJson: metadataJson);
+            }
+
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            return;
+        }
+
+        throw new PermanentWebhookException($"Plan diferido rechazado por catálogo: {reason}", null);
+    }
 }

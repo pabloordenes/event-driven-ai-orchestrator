@@ -6,18 +6,24 @@ using MassTransit.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Moq;
+using Omro.Application.Contracts;
 using Omro.Application.Interfaces;
+using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Application.ResolutionTasks.Services;
 using Omro.Contracts.Events;
 using Omro.Domain.Messaging;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
+using Omro.Domain.Tenants;
+using Omro.Infrastructure.Configuration;
 using Omro.Infrastructure.HttpClients;
 using Omro.Infrastructure.Messaging.Configuration;
 using Omro.Infrastructure.Messaging.Observers;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
+using Omro.Infrastructure.Tenants;
+using Omro.Infrastructure.Validation;
 using Omro.Worker.Consumers;
 
 namespace Omro.IntegrationTests;
@@ -185,11 +191,22 @@ public class WebhookDispatcherResilienceTests
 
         services.AddDbContext<ApplicationDbContext>(o =>
             o.UseInMemoryDatabase(dbName).UseInternalServiceProvider(inMemoryProvider));
+        services.AddMemoryCache();
+        services.Configure<TenantCacheOptions>(_ => { });
+        services.Configure<PlanValidationOptions>(_ => { });
         services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
         services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
+        services.AddScoped<ITenantConfigRepository, TenantConfigRepository>();
+        services.AddScoped<IShadowDecisionRepository, ShadowDecisionRepository>();
         services.AddScoped<IActionExecutionCoordinator, ActionExecutionCoordinator>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
         services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
+        services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
+        services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
+        services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
+        services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
+        services.AddSingleton<IAiPlanContractParser, AiPlanContractParser>();
+        services.AddSingleton<IActionIdempotencyKeyGenerator, ActionIdempotencyKeyGenerator>();
 
         var webhookMock = new Moq.Mock<IWebhookDispatcher>();
         webhookMock
@@ -198,7 +215,8 @@ public class WebhookDispatcherResilienceTests
                 Moq.It.IsAny<Dictionary<string, object>>(),
                 Moq.It.IsAny<CancellationToken>(),
                 Moq.It.IsAny<string?>(),
-                Moq.It.IsAny<Guid?>()))
+                Moq.It.IsAny<Guid?>(),
+                Moq.It.IsAny<WebhookDispatchOptions?>()))
             .Callback(() => Interlocked.Increment(ref webhookCalls))
             .ReturnsAsync(WebhookDispatchResult.Succeeded(200, 1));
         services.AddSingleton(webhookMock.Object);
@@ -257,9 +275,57 @@ public class WebhookDispatcherResilienceTests
 
         try
         {
+            var tenantId = Guid.NewGuid();
+            using (var seedScope = provider.CreateScope())
+            {
+                var seedDb = seedScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                var seedTenant = TenantConfig.Create(
+                    tenantId,
+                    $"tenant-{tenantId:N}",
+                    "Test Tenant",
+                    "Prompt context",
+                    "tenant-api",
+                    autonomousExecutionEnabled: true,
+                    allowedEndpointHostsJson: "[\"https://medcare.test\"]");
+                seedTenant.AddAction(TenantAction.Create(
+                    tenantId,
+                    "OVERBOOK",
+                    "Test action",
+                    "https://medcare.test/api/appointments/overbook",
+                    defaultPayloadTemplateJson: "{\"ok\":true}"));
+                seedTenant.AddAction(TenantAction.Create(
+                    tenantId,
+                    "MONITOR_RESOURCE",
+                    "Deferred monitor",
+                    "https://medcare.test/api/appointments/monitor",
+                    defaultPayloadTemplateJson: "{\"ok\":true}"));
+                seedTenant.AddPolicy(TenantPolicy.Create(
+                    tenantId,
+                    "AppointmentNoShowRisk",
+                    """
+                    {
+                      "hitPolicy": "FIRST_MATCH",
+                      "rules": [
+                        {
+                          "ruleId": "auto",
+                          "priority": 10,
+                          "when": { "field": "riskProbability", "op": "gte", "value": 0.85 },
+                          "then": {
+                            "outcome": "ExecuteActions",
+                            "invokeLlmEnrichment": true,
+                            "actions": [{ "actionType": "OVERBOOK" }]
+                          }
+                        }
+                      ]
+                    }
+                    """));
+                seedDb.TenantConfigs.Add(seedTenant);
+                await seedDb.SaveChangesAsync();
+            }
+
             var anomalyMsgId = Guid.NewGuid();
             var anomaly = new AnomalyDetected(
-                Guid.NewGuid(),
+                tenantId,
                 Guid.NewGuid(),
                 "AppointmentNoShowRisk",
                 Guid.NewGuid(),
@@ -267,29 +333,24 @@ public class WebhookDispatcherResilienceTests
                 new Dictionary<string, string>());
 
             await harness.Bus.Publish(anomaly, ctx => ctx.MessageId = anomalyMsgId);
+            await WaitUntilAsync(() => receiveObserver.GetPostConsumeCount(anomalyMsgId) >= 1);
             await harness.Bus.Publish(anomaly, ctx => ctx.MessageId = anomalyMsgId);
 
             var approvedMsgId = Guid.NewGuid();
             var approved = new ResolutionApproved(
-                Guid.NewGuid(),
+                tenantId,
                 Guid.NewGuid(),
                 Guid.NewGuid(),
                 Guid.NewGuid(),
                 "{\"DeferredActions\":[{\"Endpoint\":\"https://medcare.test/api/appointments/monitor\",\"Payload\":{\"ok\":true}}]}");
 
             await harness.Bus.Publish(approved, ctx => ctx.MessageId = approvedMsgId);
+            await WaitUntilAsync(() => receiveObserver.GetPostConsumeCount(approvedMsgId) >= 1);
             await harness.Bus.Publish(approved, ctx => ctx.MessageId = approvedMsgId);
 
-            var deadline = DateTime.UtcNow.AddSeconds(5);
-            while (DateTime.UtcNow < deadline)
-            {
-                if (receiveObserver.GetPostReceiveCount(anomalyMsgId) >= 2 &&
-                    receiveObserver.GetPostReceiveCount(approvedMsgId) >= 2)
-                {
-                    break;
-                }
-                await Task.Delay(30);
-            }
+            await WaitUntilAsync(() =>
+                receiveObserver.GetPostReceiveCount(anomalyMsgId) >= 2 &&
+                receiveObserver.GetPostReceiveCount(approvedMsgId) >= 2);
 
             receiveObserver.GetPostReceiveCount(anomalyMsgId).Should().Be(2);
             receiveObserver.GetPostReceiveCount(approvedMsgId).Should().Be(2);
@@ -314,10 +375,17 @@ public class WebhookDispatcherResilienceTests
     {
         var services = new ServiceCollection();
         services.AddLogging();
+        services.AddSingleton<IDnsResolver, StubPublicDnsResolver>();
         services.AddResilientWebhookHttpClient(
             configure,
             builder => builder.ConfigurePrimaryHttpMessageHandler(() => primaryHandler));
         return services.BuildServiceProvider();
+    }
+
+    private sealed class StubPublicDnsResolver : IDnsResolver
+    {
+        public Task<IPAddress[]> GetHostAddressesAsync(string host, CancellationToken cancellationToken = default)
+            => Task.FromResult(new[] { IPAddress.Parse("93.184.216.34") });
     }
 
     private sealed class DelegateHttpMessageHandler : HttpMessageHandler
@@ -331,12 +399,25 @@ public class WebhookDispatcherResilienceTests
             => Task.FromResult(_fn(request, cancellationToken));
     }
 
+    private static async Task WaitUntilAsync(Func<bool> condition, int timeoutSeconds = 5)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+        while (DateTime.UtcNow < deadline && !condition())
+        {
+            await Task.Delay(20);
+        }
+    }
+
     private sealed class CountingReceiveObserver : IReceiveObserver
     {
         private readonly ConcurrentDictionary<Guid, int> _counts = new();
+        private readonly ConcurrentDictionary<Guid, int> _consumedCounts = new();
 
         public int GetPostReceiveCount(Guid messageId) =>
             _counts.TryGetValue(messageId, out var c) ? c : 0;
+
+        public int GetPostConsumeCount(Guid messageId) =>
+            _consumedCounts.TryGetValue(messageId, out var c) ? c : 0;
 
         public Task PreReceive(ReceiveContext context) => Task.CompletedTask;
 
@@ -349,7 +430,11 @@ public class WebhookDispatcherResilienceTests
         }
 
         public Task PostConsume<T>(ConsumeContext<T> context, TimeSpan duration, string consumerType) where T : class
-            => Task.CompletedTask;
+        {
+            if (context.MessageId.HasValue)
+                _consumedCounts.AddOrUpdate(context.MessageId.Value, 1, (_, c) => c + 1);
+            return Task.CompletedTask;
+        }
 
         public Task ConsumeFault<T>(ConsumeContext<T> context, TimeSpan duration, string consumerType, Exception exception) where T : class
             => Task.CompletedTask;

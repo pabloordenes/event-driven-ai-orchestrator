@@ -1,8 +1,10 @@
 using System.Net;
+using System.Net.Sockets;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Http.Resilience;
 using Omro.Application.Interfaces;
+using Omro.Infrastructure.Security;
 using Polly;
 using Polly.Timeout;
 
@@ -31,12 +33,20 @@ public static class WebhookResilienceExtensions
         var resilienceOptions = new WebhookResilienceOptions();
         configure?.Invoke(resilienceOptions);
 
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddSingleton<IDnsResolver, SystemDnsResolver>();
+        services.TryAddSingleton<ISsrfGuard, SsrfGuard>();
+        services.TryAddSingleton<ISecretResolver, ConfigurationSecretResolver>();
+        services.TryAddSingleton<ITenantAuthSigner, TenantAuthSigner>();
         services.TryAddTransient<WebhookAttemptCounterHandler>();
 
         var clientBuilder = services.AddHttpClient<IWebhookDispatcher, WebhookDispatcher>(client =>
         {
             client.Timeout = Timeout.InfiniteTimeSpan;
         });
+
+        clientBuilder.ConfigurePrimaryHttpMessageHandler(sp =>
+            CreateSsrfProtectedSocketsHandler(sp.GetRequiredService<ISsrfGuard>()));
 
         configureClientBuilder?.Invoke(clientBuilder);
 
@@ -70,10 +80,59 @@ public static class WebhookResilienceExtensions
         return clientBuilder;
     }
 
+    public static SocketsHttpHandler CreateSsrfProtectedSocketsHandler(ISsrfGuard ssrfGuard)
+    {
+        ArgumentNullException.ThrowIfNull(ssrfGuard);
+
+        return new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            ConnectCallback = async (context, cancellationToken) =>
+            {
+                var validation = await ssrfGuard.ValidateHostAsync(context.DnsEndPoint.Host, cancellationToken);
+                if (!validation.IsAllowed || validation.ResolvedAddresses.Length == 0)
+                {
+                    throw new SsrfBlockedException(
+                        validation.BlockReason ?? $"Host '{context.DnsEndPoint.Host}' bloqueado por guardia SSRF.");
+                }
+
+                Exception? lastError = null;
+                foreach (var address in validation.ResolvedAddresses)
+                {
+                    var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp)
+                    {
+                        NoDelay = true
+                    };
+
+                    try
+                    {
+                        await socket.ConnectAsync(new IPEndPoint(address, context.DnsEndPoint.Port), cancellationToken);
+                        return new NetworkStream(socket, ownsSocket: true);
+                    }
+                    catch (Exception ex)
+                    {
+                        socket.Dispose();
+                        if (ex is OperationCanceledException && cancellationToken.IsCancellationRequested)
+                            throw;
+
+                        lastError = ex;
+                    }
+                }
+
+                throw new HttpRequestException(
+                    $"No se pudo conectar a '{context.DnsEndPoint.Host}:{context.DnsEndPoint.Port}' en ninguna IP pública resuelta.",
+                    lastError);
+            }
+        };
+    }
+
     public static bool IsTransientOutcome(Outcome<HttpResponseMessage> outcome)
     {
         if (outcome.Exception is not null)
         {
+            if (IsSsrfException(outcome.Exception))
+                return false;
+
             return outcome.Exception is HttpRequestException
                 or TimeoutRejectedException
                 or TaskCanceledException;
@@ -94,6 +153,11 @@ public static class WebhookResilienceExtensions
     public static bool IsPermanentHttpStatus(HttpStatusCode statusCode)
     {
         var code = (int)statusCode;
-        return code is >= 400 and < 500 && !IsTransientHttpStatus(statusCode);
+        return code is >= 300 and < 500 && !IsTransientHttpStatus(statusCode);
     }
+
+    private static bool IsSsrfException(Exception ex) =>
+        ex is SsrfBlockedException ||
+        ex.InnerException is SsrfBlockedException ||
+        ex.GetBaseException() is SsrfBlockedException;
 }

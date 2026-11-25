@@ -25,4 +25,8 @@
       <ProjectReference Include="..\Omro.Infrastructure\Omro.Infrastructure.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+      <Content Include="..\Omro.Worker\Seeds\medcare.tenant.json" Link="Seeds\medcare.tenant.json" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+
 </Project>

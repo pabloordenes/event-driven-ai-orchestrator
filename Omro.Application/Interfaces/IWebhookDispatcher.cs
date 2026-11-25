@@ -18,6 +18,13 @@ public record WebhookDispatchResult(
         new(false, httpStatusCode, Math.Max(0, attempts), false, errorMessage, DateTime.UtcNow);
 }
 
+public sealed record WebhookDispatchOptions(
+    Guid? TenantId = null,
+    string HttpMethod = "POST",
+    int? TimeoutSeconds = null,
+    int? MaxPayloadBytes = null,
+    string? ActionType = null);
+
 public interface IWebhookDispatcher
 {
     Task<WebhookDispatchResult> DispatchAsync(
@@ -25,5 +32,6 @@ public interface IWebhookDispatcher
         Dictionary<string, object> payload,
         CancellationToken cancellationToken,
         string? idempotencyKey = null,
-        Guid? omroTaskId = null);
+        Guid? omroTaskId = null,
+        WebhookDispatchOptions? dispatchOptions = null);
 }
