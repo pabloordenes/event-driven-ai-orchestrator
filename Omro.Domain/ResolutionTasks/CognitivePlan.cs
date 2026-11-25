@@ -5,7 +5,8 @@ public record CognitivePlan(
     string Reasoning,
     decimal ConfidenceScore,
     List<ProposedAction> ProposedActions,
-    bool IsFallback = false
+    bool IsFallback = false,
+    bool ExpectsExternalApproval = false
 );
 
 public record ProposedAction(

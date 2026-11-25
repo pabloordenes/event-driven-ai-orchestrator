@@ -3,11 +3,16 @@ using MassTransit;
 using MassTransit.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 using Omro.Application.Interfaces;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
+using Omro.Application.ResolutionTasks.Services;
 using Omro.Contracts.Events;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
+using Omro.Infrastructure.Messaging.Configuration;
+using Omro.Infrastructure.Messaging.Observers;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
 using Omro.Worker.Consumers;
@@ -29,7 +34,10 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             options.UseInMemoryDatabase(sharedDbName));
 
         services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
+        services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
+        services.AddScoped<IActionExecutionCoordinator, ActionExecutionCoordinator>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
+        services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
 
         _webhookMock = new Moq.Mock<IWebhookDispatcher>();
         _webhookMock
@@ -37,19 +45,32 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
                 Moq.It.IsAny<string>(),
                 Moq.It.IsAny<Dictionary<string, object>>(),
                 Moq.It.IsAny<CancellationToken>(),
-                Moq.It.IsAny<string?>()))
-            .Returns(Task.CompletedTask);
+                Moq.It.IsAny<string?>(),
+                Moq.It.IsAny<Guid?>()))
+            .ReturnsAsync(WebhookDispatchResult.Succeeded(200, 1));
         services.AddSingleton(_webhookMock.Object);
 
         services.AddScoped<ICognitiveOrchestrator, FakeCognitiveOrchestrator>();
+
+        services.Configure<RabbitMqMessagingOptions>(o =>
+        {
+            o.RedeliveryMode = "None";
+            o.RetryLimit = 1;
+            o.RetryMinIntervalMs = 15;
+            o.RetryMaxIntervalMs = 30;
+            o.RetryIntervalDeltaMs = 10;
+        });
+        services.AddSingleton<IOperationalAlertSink, LoggingOperationalAlertSink>();
+        services.AddSingleton<DeadLetterAlertObserver>();
 
         services.AddMediatR(cfg =>
             cfg.RegisterServicesFromAssemblyContaining<IngestAnomalyCommandHandler>());
 
         services.AddMassTransitTestHarness(x =>
         {
-            x.AddConsumer<AnomalyEventConsumer>();
-            x.AddConsumer<ResolutionApprovedConsumer>();
+            x.SetTestTimeouts(testTimeout: TimeSpan.FromSeconds(15), testInactivityTimeout: TimeSpan.FromSeconds(2));
+            x.AddConsumer<AnomalyEventConsumer, AnomalyEventConsumerDefinition>();
+            x.AddConsumer<ResolutionApprovedConsumer, ResolutionApprovedConsumerDefinition>();
         });
 
         services.AddLogging();
@@ -134,7 +155,8 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             "https://medcare.test/api/appointments/overbook",
             Moq.It.IsAny<Dictionary<string, object>>(),
             Moq.It.IsAny<CancellationToken>(),
-            $"{tasks[0].Id}:0"), Moq.Times.Once);
+            $"{tasks[0].Id}:0",
+            Moq.It.IsAny<Guid?>()), Moq.Times.Once);
     }
 
     [Fact]
@@ -169,7 +191,8 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             "https://medcare.test/api/appointments/monitor",
             Moq.It.IsAny<Dictionary<string, object>>(),
             Moq.It.IsAny<CancellationToken>(),
-            $"{taskId}:deferred:0"), Moq.Times.Once);
+            $"{taskId}:deferred:0",
+            Moq.It.IsAny<Guid?>()), Moq.Times.Once);
     }
 
     public class FakeCognitiveOrchestrator : ICognitiveOrchestrator
@@ -211,6 +234,10 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         await using var db = new ApplicationDbContext(dbOptions);
         var repo = new ResolutionTaskRepository(db);
         var uow = new UnitOfWork(db);
+        var coordinator = new ActionExecutionCoordinator(
+            handlerMock.Object,
+            uow,
+            NullLogger<ActionExecutionCoordinator>.Instance);
 
         var failingHttpClient = new HttpClient(new FailingHttpMessageHandler())
         {
@@ -225,7 +252,12 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         var logger = Microsoft.Extensions.Logging.Abstractions.NullLogger<Omro.Infrastructure.CognitiveServices.Agents.GroqCognitiveOrchestrator>.Instance;
         var orchestrator = new Omro.Infrastructure.CognitiveServices.Agents.GroqCognitiveOrchestrator(failingHttpClient, groqOptions, config, logger);
 
-        var cmdHandler = new IngestAnomalyCommandHandler(repo, uow, orchestrator, handlerMock.Object);
+        var cmdHandler = new IngestAnomalyCommandHandler(
+            repo,
+            uow,
+            orchestrator,
+            coordinator,
+            NullLogger<IngestAnomalyCommandHandler>.Instance);
         var taskId = await cmdHandler.Handle(new IngestAnomalyCommand(Guid.NewGuid(), 0.91m, Guid.NewGuid()), CancellationToken.None);
 
         failingHttpClient.DefaultRequestHeaders.Authorization.Should().BeNull();
@@ -257,12 +289,14 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             Microsoft.Extensions.Logging.Abstractions.NullLogger<Omro.Infrastructure.HttpClients.WebhookDispatcher>.Instance,
             tokenService);
 
-        await dispatcher.DispatchAsync(
+        var result = await dispatcher.DispatchAsync(
             "https://medcare.test/api/appointments/overbook",
             new Dictionary<string, object> { ["ok"] = true },
             CancellationToken.None,
             "task-1:0");
 
+        result.IsSuccess.Should().BeTrue();
+        result.HttpStatusCode.Should().Be(200);
         captureHandler.LastRequest.Should().NotBeNull();
         captureHandler.LastRequest!.Headers.GetValues("Idempotency-Key").Should().ContainSingle("task-1:0");
         captureHandler.LastRequest.Headers.Authorization.Should().NotBeNull();
@@ -282,6 +316,74 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         }, out _);
 
         principal.FindFirst("role")?.Value.Should().Be("omro_service");
+    }
+
+    [Fact]
+    public async Task IngestAnomaly_ShouldForwardAgnosticAttributesToCognitiveOrchestratorAndGroqPrompt()
+    {
+        var dbOptions = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        await using var db = new ApplicationDbContext(dbOptions);
+        var repo = new ResolutionTaskRepository(db);
+        var uow = new UnitOfWork(db);
+        var webhookMock = new Moq.Mock<IWebhookDispatcher>(Moq.MockBehavior.Strict);
+        var coordinator = new ActionExecutionCoordinator(webhookMock.Object, uow, NullLogger<ActionExecutionCoordinator>.Instance);
+
+        var captureOrchestrator = new CapturingCognitiveOrchestrator();
+        var handler = new IngestAnomalyCommandHandler(
+            repo,
+            uow,
+            captureOrchestrator,
+            coordinator,
+            NullLogger<IngestAnomalyCommandHandler>.Instance);
+
+        var attributes = new Dictionary<string, string>
+        {
+            ["final_notification_delivered"] = "false",
+            ["clinical_exclusion"] = "true",
+            ["auto_overbook_enabled"] = "false"
+        };
+
+        await handler.Handle(
+            new IngestAnomalyCommand(
+                Guid.NewGuid(),
+                0.91m,
+                Guid.NewGuid(),
+                "ConfirmationDeadlineMissed",
+                Guid.NewGuid(),
+                attributes),
+            CancellationToken.None);
+
+        captureOrchestrator.CapturedAttributes.Should().NotBeNull();
+        captureOrchestrator.CapturedAttributes!["final_notification_delivered"].Should().Be("false");
+        captureOrchestrator.CapturedAttributes["clinical_exclusion"].Should().Be("true");
+        captureOrchestrator.CapturedAttributes["auto_overbook_enabled"].Should().Be("false");
+    }
+
+    private sealed class CapturingCognitiveOrchestrator : ICognitiveOrchestrator
+    {
+        public IReadOnlyDictionary<string, string>? CapturedAttributes { get; private set; }
+
+        public Task<(CognitivePlan Plan, int PromptTokens, int CompletionTokens)> ProposeResolutionAsync(
+            AnomalyEvent anomaly,
+            string tenantPromptContext,
+            CancellationToken cancellationToken = default)
+            => ProposeResolutionAsync(anomaly, tenantPromptContext, null, cancellationToken);
+
+        public Task<(CognitivePlan Plan, int PromptTokens, int CompletionTokens)> ProposeResolutionAsync(
+            AnomalyEvent anomaly,
+            string tenantPromptContext,
+            IReadOnlyDictionary<string, string>? attributes,
+            CancellationToken cancellationToken = default)
+        {
+            CapturedAttributes = attributes;
+            return Task.FromResult((
+                new CognitivePlan("HITL", "Evaluado con atributos", 0.90m, new List<ProposedAction>(), IsFallback: true),
+                10,
+                10));
+        }
     }
 
     private sealed class CapturingHttpMessageHandler : HttpMessageHandler

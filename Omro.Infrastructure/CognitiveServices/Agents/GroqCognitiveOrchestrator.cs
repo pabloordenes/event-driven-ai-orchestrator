@@ -37,11 +37,22 @@ public class GroqCognitiveOrchestrator : ICognitiveOrchestrator
         }
     }
 
-    public async Task<(CognitivePlan Plan, int PromptTokens, int CompletionTokens)> ProposeResolutionAsync(
+    public Task<(CognitivePlan Plan, int PromptTokens, int CompletionTokens)> ProposeResolutionAsync(
         AnomalyEvent anomaly,
         string tenantPromptContext,
         CancellationToken cancellationToken = default)
+        => ProposeResolutionAsync(anomaly, tenantPromptContext, null, cancellationToken);
+
+    public async Task<(CognitivePlan Plan, int PromptTokens, int CompletionTokens)> ProposeResolutionAsync(
+        AnomalyEvent anomaly,
+        string tenantPromptContext,
+        IReadOnlyDictionary<string, string>? attributes,
+        CancellationToken cancellationToken = default)
     {
+        var attributesSection = attributes is { Count: > 0 }
+            ? string.Join("\n", attributes.OrderBy(kvp => kvp.Key, StringComparer.Ordinal).Select(kvp => $"- {kvp.Key}: {kvp.Value}"))
+            : "- (sin atributos adicionales)";
+
         string prompt = $$"""
                           Actúas como el orquestador cognitivo del sistema OMRO.
                           Tu objetivo es proponer un plan de resolución para una anomalía operativa.
@@ -50,8 +61,13 @@ public class GroqCognitiveOrchestrator : ICognitiveOrchestrator
                           {{tenantPromptContext}}
 
                           DATOS DE LA ANOMALÍA:
+                          - Tipo de Anomalía: {{anomaly.AnomalyType}}
                           - ID del Recurso afectado: {{anomaly.ResourceId}}
+                          - CorrelationId: {{anomaly.CorrelationId}}
                           - Probabilidad de Riesgo: {{anomaly.RiskProbability}}
+
+                          ATRIBUTOS DEL EVENTO:
+                          {{attributesSection}}
 
                           INSTRUCCIONES DE SALIDA:
                           Debes responder ÚNICA y EXCLUSIVAMENTE con un objeto JSON válido que cumpla esta estructura exacta.
@@ -61,6 +77,7 @@ public class GroqCognitiveOrchestrator : ICognitiveOrchestrator
                             "Title": "Título corto y claro",
                             "Reasoning": "Justificación basada en las reglas del inquilino",
                             "ConfidenceScore": 0.95,
+                            "ExpectsExternalApproval": false,
                             "ProposedActions": [
                               {
                                 "ActionType": "TIPO_DE_ACCION",
@@ -69,6 +86,7 @@ public class GroqCognitiveOrchestrator : ICognitiveOrchestrator
                               }
                             ]
                           }
+                          Nota: establece "ExpectsExternalApproval": true únicamente si las reglas del inquilino indican que tras estas acciones iniciales se requiere aprobación externa/humana antes de ejecutar acciones diferidas.
                           """;
 
         try
