@@ -199,16 +199,45 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
             string tenantPromptContext = tenantConfig.BuildOrchestratorPromptContext(request.AnomalyType);
             try
             {
-                var (llmPlan, llmPromptTokens, llmCompletionTokens) = request.Attributes is { Count: > 0 }
-                    ? await _orchestrator.ProposeResolutionAsync(
+                CognitiveOrchestrationResult? telemetryResult = null;
+                CognitivePlan llmPlan;
+                int llmPromptTokens;
+                int llmCompletionTokens;
+
+                if (_orchestrator is ITelemetryCognitiveOrchestrator telemetryOrchestrator)
+                {
+                    var orchestrationCtx = new CognitiveOrchestrationContext(
+                        TenantId: tenantConfig.TenantId,
+                        TenantSlug: tenantConfig.TenantSlug,
+                        ResolutionTaskId: resolutionTask.Id,
+                        PreferredProvider: tenantConfig.LlmSettings.PreferredProvider,
+                        TimeoutMs: tenantConfig.LlmSettings.TimeoutMs,
+                        DailyTokenBudget: tenantConfig.LlmSettings.DailyTokenBudget);
+
+                    telemetryResult = await telemetryOrchestrator.ProposeResolutionWithTelemetryAsync(
                         anomalyEvent,
                         tenantPromptContext,
                         request.Attributes,
-                        cancellationToken)
-                    : await _orchestrator.ProposeResolutionAsync(
-                        anomalyEvent,
-                        tenantPromptContext,
+                        orchestrationCtx,
                         cancellationToken);
+
+                    llmPlan = telemetryResult.Plan;
+                    llmPromptTokens = telemetryResult.PromptTokens;
+                    llmCompletionTokens = telemetryResult.CompletionTokens;
+                }
+                else
+                {
+                    (llmPlan, llmPromptTokens, llmCompletionTokens) = request.Attributes is { Count: > 0 }
+                        ? await _orchestrator.ProposeResolutionAsync(
+                            anomalyEvent,
+                            tenantPromptContext,
+                            request.Attributes,
+                            cancellationToken)
+                        : await _orchestrator.ProposeResolutionAsync(
+                            anomalyEvent,
+                            tenantPromptContext,
+                            cancellationToken);
+                }
 
                 if (!llmPlan.IsFallback)
                 {
@@ -216,6 +245,15 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                     promptTokens = llmPromptTokens;
                     completionTokens = llmCompletionTokens;
                     planAgentName = "HybridOrchestrator";
+
+                    if (telemetryResult is { UsedFallbackProvider: true })
+                    {
+                        resolutionTask.RecordTrace(
+                            agentName: "HybridOrchestrator",
+                            stepType: "LlmProviderFallbackSucceeded",
+                            traceMessage:
+                            $"Enriquecimiento completado mediante proveedor fallback '{telemetryResult.ProviderName}' ({telemetryResult.ModelName}). Tokens: {llmPromptTokens}+{llmCompletionTokens}, costo estimado: ${telemetryResult.EstimatedCostUsd:F6} USD.");
+                    }
                 }
                 else
                 {
