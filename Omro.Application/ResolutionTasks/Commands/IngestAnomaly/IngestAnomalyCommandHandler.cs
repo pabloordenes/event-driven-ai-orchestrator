@@ -17,6 +17,7 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
     private readonly ITenantConfigProvider _tenantConfigProvider;
     private readonly IPolicyEngine _policyEngine;
     private readonly IDeterministicPlanBuilder _planBuilder;
+    private readonly IPlanValidator _planValidator;
     private readonly IShadowDecisionRepository _shadowDecisionRepository;
     private readonly ILogger<IngestAnomalyCommandHandler> _logger;
 
@@ -28,6 +29,7 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         ITenantConfigProvider tenantConfigProvider,
         IPolicyEngine policyEngine,
         IDeterministicPlanBuilder planBuilder,
+        IPlanValidator planValidator,
         IShadowDecisionRepository shadowDecisionRepository,
         ILogger<IngestAnomalyCommandHandler> logger)
     {
@@ -38,6 +40,7 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         _tenantConfigProvider = tenantConfigProvider;
         _policyEngine = policyEngine;
         _planBuilder = planBuilder;
+        _planValidator = planValidator;
         _shadowDecisionRepository = shadowDecisionRepository;
         _logger = logger;
     }
@@ -228,6 +231,26 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
                     stepType: "LlmUnavailableDeterministicFallback",
                     traceMessage: $"Error invocando LLM ({ex.Message}). Se ejecuta plan base determinista de '{decision.MatchedRuleId}'.");
             }
+        }
+
+        var validation = _planValidator.ValidateImmediatePlan(tenantConfig, decision, finalPlan);
+        if (!validation.IsValid)
+        {
+            _logger.LogError(
+                "[OMRO PLAN VALIDATION FAILED] Tenant {TenantSlug}, tarea {TaskId}, anomalía {AnomalyType}: {Summary}",
+                tenantConfig.TenantSlug,
+                resolutionTask.Id,
+                request.AnomalyType,
+                validation.Summary);
+
+            resolutionTask.MarkNeedsHumanReview(
+                validation.Summary,
+                agentName: "PlanValidator",
+                stepType: "PlanValidationFailed",
+                metadataJson: validation.ToAuditJson());
+            _repository.Add(resolutionTask);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            return resolutionTask.Id;
         }
 
         if (decision.ShadowIntent is not null)

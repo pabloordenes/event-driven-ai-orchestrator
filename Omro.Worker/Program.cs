@@ -15,6 +15,7 @@ using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
 using Omro.Infrastructure.Security;
 using Omro.Infrastructure.Tenants;
+using Omro.Infrastructure.Validation;
 using Omro.Worker.Consumers;
 using Quartz;
 
@@ -44,6 +45,8 @@ builder.Services.Configure<TenantCacheOptions>(
     builder.Configuration.GetSection(TenantCacheOptions.SectionName));
 builder.Services.Configure<TenantSeedingOptions>(
     builder.Configuration.GetSection(TenantSeedingOptions.SectionName));
+builder.Services.Configure<PlanValidationOptions>(
+    builder.Configuration.GetSection(PlanValidationOptions.SectionName));
 
 builder.Services.AddMemoryCache();
 
@@ -55,6 +58,7 @@ builder.Services.AddSingleton<IOmroTokenService, OmroTokenService>();
 builder.Services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
 builder.Services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
 builder.Services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
+builder.Services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
 builder.Services.AddSingleton<IOperationalAlertSink, LoggingOperationalAlertSink>();
 builder.Services.AddSingleton<DeadLetterAlertObserver>();
 

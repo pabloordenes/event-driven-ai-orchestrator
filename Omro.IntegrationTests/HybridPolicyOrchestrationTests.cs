@@ -24,6 +24,7 @@ using Omro.Infrastructure.Messaging.Observers;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
 using Omro.Infrastructure.Tenants;
+using Omro.Infrastructure.Validation;
 using Omro.Worker.Consumers;
 
 namespace Omro.IntegrationTests;
@@ -318,6 +319,7 @@ public class HybridPolicyOrchestrationTests
                 o.UseInMemoryDatabase(dbName).UseInternalServiceProvider(inMemoryProvider));
             services.AddMemoryCache();
             services.Configure<TenantCacheOptions>(_ => { });
+            services.Configure<PlanValidationOptions>(_ => { });
             services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
             services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
             services.AddScoped<ITenantConfigRepository, TenantConfigRepository>();
@@ -329,6 +331,7 @@ public class HybridPolicyOrchestrationTests
             services.AddScoped<ITenantSeedLoader, JsonTenantSeedLoader>();
             services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
             services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
+            services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
             services.AddSingleton(orchestrator);
 
             services.AddResilientWebhookHttpClient(
