@@ -37,11 +37,22 @@ public class GroqCognitiveOrchestrator : ICognitiveOrchestrator
         }
     }
 
-    public async Task<(CognitivePlan Plan, int PromptTokens, int CompletionTokens)> ProposeResolutionAsync(
+    public Task<(CognitivePlan Plan, int PromptTokens, int CompletionTokens)> ProposeResolutionAsync(
         AnomalyEvent anomaly,
         string tenantPromptContext,
         CancellationToken cancellationToken = default)
+        => ProposeResolutionAsync(anomaly, tenantPromptContext, null, cancellationToken);
+
+    public async Task<(CognitivePlan Plan, int PromptTokens, int CompletionTokens)> ProposeResolutionAsync(
+        AnomalyEvent anomaly,
+        string tenantPromptContext,
+        IReadOnlyDictionary<string, string>? attributes,
+        CancellationToken cancellationToken = default)
     {
+        var attributesSection = attributes is { Count: > 0 }
+            ? string.Join("\n", attributes.OrderBy(kvp => kvp.Key, StringComparer.Ordinal).Select(kvp => $"- {kvp.Key}: {kvp.Value}"))
+            : "- (sin atributos adicionales)";
+
         string prompt = $$"""
                           Actúas como el orquestador cognitivo del sistema OMRO.
                           Tu objetivo es proponer un plan de resolución para una anomalía operativa.
@@ -50,8 +61,13 @@ public class GroqCognitiveOrchestrator : ICognitiveOrchestrator
                           {{tenantPromptContext}}
 
                           DATOS DE LA ANOMALÍA:
+                          - Tipo de Anomalía: {{anomaly.AnomalyType}}
                           - ID del Recurso afectado: {{anomaly.ResourceId}}
+                          - CorrelationId: {{anomaly.CorrelationId}}
                           - Probabilidad de Riesgo: {{anomaly.RiskProbability}}
+
+                          ATRIBUTOS DEL EVENTO:
+                          {{attributesSection}}
 
                           INSTRUCCIONES DE SALIDA:
                           Debes responder ÚNICA y EXCLUSIVAMENTE con un objeto JSON válido que cumpla esta estructura exacta.

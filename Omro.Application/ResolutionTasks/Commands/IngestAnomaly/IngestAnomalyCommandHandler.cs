@@ -71,35 +71,46 @@ public class IngestAnomalyCommandHandler : IRequestHandler<IngestAnomalyCommand,
         // mutación de dominio
         resolutionTask.StartAnalysis();
 
-        // Simulamos las reglas de negocio extraídas desde la base de datos para este Tenant (Clínica)
+        // Simulamos las reglas de negocio extraídas desde el catálogo/políticas del Tenant (E5 reemplazará este fixture por BD)
         string tenantPromptContext = """
-                                     Eres el sistema de decisiones de MedCareOS para la 'Clínica San José'.
-                                     Tu objetivo es mitigar el impacto financiero de los pacientes que no asisten a sus citas (No-Shows).
-                                     NOTA: Solo recibes citas que ya fueron catalogadas como Anomalías (Riesgo >= 0.50).
+                                     Eres el sistema de decisiones de OMRO para el tenant configurado.
+                                     Tu objetivo es seleccionar acciones exclusivamente desde el catálogo autorizado según score y atributos genéricos del evento.
+                                     NOTA: Solo recibes anomalías operativas relevantes (RiskProbability >= 0.50).
 
-                                     REGLAS DE NEGOCIO:
-                                     1. RIESGO CRÍTICO (RiskProbability MAYOR o IGUAL a 0.85, es decir >= 0.85):
-                                     - El paciente casi seguro faltará. Autoriza un sobrecupo automático.
-                                     - ExpectsExternalApproval: false
-                                     - ActionType: "GENERATE_OVERBOOK"
-                                     - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/appointments/overbook"
-                                     - Payload: Debe incluir "resourceId", "targetRisk": <el valor del riesgo>, y "autoApprove": true.
-
-                                     2. RIESGO MODERADO (RiskProbability MAYOR o IGUAL a 0.50 y MENOR a 0.85, es decir >= 0.50 y < 0.85):
-                                     - Riesgo de choque de agenda. NO automatices el sobrecupo.
-                                     - Envía una propuesta para que el administrador humano revise el caso (HITL).
+                                     REGLAS DE DECISIÓN DEL TENANT:
+                                     1. SI `final_notification_delivered` == "false":
+                                     - Prohibido ejecutar acción autónoma sobre el cupo. Deriva a propuesta HITL de monitoreo manual.
                                      - ExpectsExternalApproval: true
                                      - ActionType: "PROPOSE_RESOLUTION"
                                      - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/resolutions/propose"
-                                     - Payload: Debe incluir "resourceId", "riskProbability": <el valor del riesgo>, y "aiPlanJson" que contenga un string JSON escapado con la siguiente estructura de Acción Diferida:
-                                       { "DeferredActions": [ { "Endpoint": "https://medcare-cqrs-clinical-api.onrender.com/api/appointments/monitor", "Payload": { "resourceId": "<id>", "requiresAction": true } } ] }
+                                     - Payload: { "resourceId": "<ResourceId>", "riskProbability": <RiskProbability>, "aiPlanJson": "{\"DeferredActions\":[{\"Endpoint\":\"https://medcare-cqrs-clinical-api.onrender.com/api/appointments/monitor\",\"Payload\":{\"resourceId\":\"<ResourceId>\",\"requiresAction\":true,\"reason\":\"Confirmación previa requerida no entregada\"}}]}" }
+
+                                     2. SI `RiskProbability` >= 0.85 AND `auto_overbook_enabled` == "true" AND `final_notification_delivered` == "true" AND `clinical_exclusion` != "true":
+                                     - Autoriza ejecución autónoma inmediata desde el catálogo del tenant.
+                                     - ExpectsExternalApproval: false
+                                     - ActionType: "GENERATE_OVERBOOK"
+                                     - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/appointments/overbook"
+                                     - Payload: { "resourceId": "<ResourceId>", "reason": "Automated decision from risk threshold and event attributes", "correlationId": "<CorrelationId>", "decisionMode": "Autonomous" }
+
+                                     3. EN CUALQUIER OTRO CASO (0.50 <= RiskProbability < 0.85, o `clinical_exclusion` == "true", o `auto_overbook_enabled` != "true" en modo sombra):
+                                     - Envía una propuesta HITL para aprobación humana externa.
+                                     - ExpectsExternalApproval: true
+                                     - ActionType: "PROPOSE_RESOLUTION"
+                                     - Endpoint: "https://medcare-cqrs-clinical-api.onrender.com/api/resolutions/propose"
+                                     - Payload: { "resourceId": "<ResourceId>", "riskProbability": <RiskProbability>, "aiPlanJson": "{\"DeferredActions\":[{\"Endpoint\":\"https://medcare-cqrs-clinical-api.onrender.com/api/appointments/overbook\",\"Payload\":{\"resourceId\":\"<ResourceId>\",\"reason\":\"Approved HITL action\",\"correlationId\":\"<CorrelationId>\",\"decisionMode\":\"Approved\"}}]}" }
                                      """;
 
-        // razonamiento cognitivo: el modelo asume el control
-        var (plan, promptTokens, completionTokens) = await _orchestrator.ProposeResolutionAsync(
-            anomalyEvent,
-            tenantPromptContext,
-            cancellationToken);
+        // razonamiento cognitivo: el modelo asume el control con atributos agnósticos del evento
+        var (plan, promptTokens, completionTokens) = request.Attributes is { Count: > 0 }
+            ? await _orchestrator.ProposeResolutionAsync(
+                anomalyEvent,
+                tenantPromptContext,
+                request.Attributes,
+                cancellationToken)
+            : await _orchestrator.ProposeResolutionAsync(
+                anomalyEvent,
+                tenantPromptContext,
+                cancellationToken);
 
         _logger.LogInformation(
             "Decisión cognitiva generada para recurso {ResourceId}. Title={Title}, IsFallback={IsFallback}, ExpectsExternalApproval={ExpectsApproval}, Actions={ActionCount}",

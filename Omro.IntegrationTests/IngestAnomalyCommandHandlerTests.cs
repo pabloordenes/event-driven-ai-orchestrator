@@ -318,6 +318,74 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         principal.FindFirst("role")?.Value.Should().Be("omro_service");
     }
 
+    [Fact]
+    public async Task IngestAnomaly_ShouldForwardAgnosticAttributesToCognitiveOrchestratorAndGroqPrompt()
+    {
+        var dbOptions = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        await using var db = new ApplicationDbContext(dbOptions);
+        var repo = new ResolutionTaskRepository(db);
+        var uow = new UnitOfWork(db);
+        var webhookMock = new Moq.Mock<IWebhookDispatcher>(Moq.MockBehavior.Strict);
+        var coordinator = new ActionExecutionCoordinator(webhookMock.Object, uow, NullLogger<ActionExecutionCoordinator>.Instance);
+
+        var captureOrchestrator = new CapturingCognitiveOrchestrator();
+        var handler = new IngestAnomalyCommandHandler(
+            repo,
+            uow,
+            captureOrchestrator,
+            coordinator,
+            NullLogger<IngestAnomalyCommandHandler>.Instance);
+
+        var attributes = new Dictionary<string, string>
+        {
+            ["final_notification_delivered"] = "false",
+            ["clinical_exclusion"] = "true",
+            ["auto_overbook_enabled"] = "false"
+        };
+
+        await handler.Handle(
+            new IngestAnomalyCommand(
+                Guid.NewGuid(),
+                0.91m,
+                Guid.NewGuid(),
+                "ConfirmationDeadlineMissed",
+                Guid.NewGuid(),
+                attributes),
+            CancellationToken.None);
+
+        captureOrchestrator.CapturedAttributes.Should().NotBeNull();
+        captureOrchestrator.CapturedAttributes!["final_notification_delivered"].Should().Be("false");
+        captureOrchestrator.CapturedAttributes["clinical_exclusion"].Should().Be("true");
+        captureOrchestrator.CapturedAttributes["auto_overbook_enabled"].Should().Be("false");
+    }
+
+    private sealed class CapturingCognitiveOrchestrator : ICognitiveOrchestrator
+    {
+        public IReadOnlyDictionary<string, string>? CapturedAttributes { get; private set; }
+
+        public Task<(CognitivePlan Plan, int PromptTokens, int CompletionTokens)> ProposeResolutionAsync(
+            AnomalyEvent anomaly,
+            string tenantPromptContext,
+            CancellationToken cancellationToken = default)
+            => ProposeResolutionAsync(anomaly, tenantPromptContext, null, cancellationToken);
+
+        public Task<(CognitivePlan Plan, int PromptTokens, int CompletionTokens)> ProposeResolutionAsync(
+            AnomalyEvent anomaly,
+            string tenantPromptContext,
+            IReadOnlyDictionary<string, string>? attributes,
+            CancellationToken cancellationToken = default)
+        {
+            CapturedAttributes = attributes;
+            return Task.FromResult((
+                new CognitivePlan("HITL", "Evaluado con atributos", 0.90m, new List<ProposedAction>(), IsFallback: true),
+                10,
+                10));
+        }
+    }
+
     private sealed class CapturingHttpMessageHandler : HttpMessageHandler
     {
         public HttpRequestMessage? LastRequest { get; private set; }
