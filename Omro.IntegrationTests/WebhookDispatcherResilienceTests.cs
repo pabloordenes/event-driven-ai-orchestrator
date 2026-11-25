@@ -22,6 +22,7 @@ using Omro.Infrastructure.Messaging.Observers;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
 using Omro.Infrastructure.Tenants;
+using Omro.Infrastructure.Validation;
 using Omro.Worker.Consumers;
 
 namespace Omro.IntegrationTests;
@@ -191,6 +192,7 @@ public class WebhookDispatcherResilienceTests
             o.UseInMemoryDatabase(dbName).UseInternalServiceProvider(inMemoryProvider));
         services.AddMemoryCache();
         services.Configure<TenantCacheOptions>(_ => { });
+        services.Configure<PlanValidationOptions>(_ => { });
         services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
         services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
         services.AddScoped<ITenantConfigRepository, TenantConfigRepository>();
@@ -201,6 +203,7 @@ public class WebhookDispatcherResilienceTests
         services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
         services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
         services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
+        services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
 
         var webhookMock = new Moq.Mock<IWebhookDispatcher>();
         webhookMock
@@ -278,12 +281,19 @@ public class WebhookDispatcherResilienceTests
                     "Test Tenant",
                     "Prompt context",
                     "tenant-api",
-                    autonomousExecutionEnabled: true);
+                    autonomousExecutionEnabled: true,
+                    allowedEndpointHostsJson: "[\"https://medcare.test\"]");
                 seedTenant.AddAction(TenantAction.Create(
                     tenantId,
                     "OVERBOOK",
                     "Test action",
                     "https://medcare.test/api/appointments/overbook",
+                    defaultPayloadTemplateJson: "{\"ok\":true}"));
+                seedTenant.AddAction(TenantAction.Create(
+                    tenantId,
+                    "MONITOR_RESOURCE",
+                    "Deferred monitor",
+                    "https://medcare.test/api/appointments/monitor",
                     defaultPayloadTemplateJson: "{\"ok\":true}"));
                 seedTenant.AddPolicy(TenantPolicy.Create(
                     tenantId,
@@ -319,29 +329,24 @@ public class WebhookDispatcherResilienceTests
                 new Dictionary<string, string>());
 
             await harness.Bus.Publish(anomaly, ctx => ctx.MessageId = anomalyMsgId);
+            await WaitUntilAsync(() => receiveObserver.GetPostConsumeCount(anomalyMsgId) >= 1);
             await harness.Bus.Publish(anomaly, ctx => ctx.MessageId = anomalyMsgId);
 
             var approvedMsgId = Guid.NewGuid();
             var approved = new ResolutionApproved(
-                Guid.NewGuid(),
+                tenantId,
                 Guid.NewGuid(),
                 Guid.NewGuid(),
                 Guid.NewGuid(),
                 "{\"DeferredActions\":[{\"Endpoint\":\"https://medcare.test/api/appointments/monitor\",\"Payload\":{\"ok\":true}}]}");
 
             await harness.Bus.Publish(approved, ctx => ctx.MessageId = approvedMsgId);
+            await WaitUntilAsync(() => receiveObserver.GetPostConsumeCount(approvedMsgId) >= 1);
             await harness.Bus.Publish(approved, ctx => ctx.MessageId = approvedMsgId);
 
-            var deadline = DateTime.UtcNow.AddSeconds(5);
-            while (DateTime.UtcNow < deadline)
-            {
-                if (receiveObserver.GetPostReceiveCount(anomalyMsgId) >= 2 &&
-                    receiveObserver.GetPostReceiveCount(approvedMsgId) >= 2)
-                {
-                    break;
-                }
-                await Task.Delay(30);
-            }
+            await WaitUntilAsync(() =>
+                receiveObserver.GetPostReceiveCount(anomalyMsgId) >= 2 &&
+                receiveObserver.GetPostReceiveCount(approvedMsgId) >= 2);
 
             receiveObserver.GetPostReceiveCount(anomalyMsgId).Should().Be(2);
             receiveObserver.GetPostReceiveCount(approvedMsgId).Should().Be(2);
@@ -383,12 +388,25 @@ public class WebhookDispatcherResilienceTests
             => Task.FromResult(_fn(request, cancellationToken));
     }
 
+    private static async Task WaitUntilAsync(Func<bool> condition, int timeoutSeconds = 5)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+        while (DateTime.UtcNow < deadline && !condition())
+        {
+            await Task.Delay(20);
+        }
+    }
+
     private sealed class CountingReceiveObserver : IReceiveObserver
     {
         private readonly ConcurrentDictionary<Guid, int> _counts = new();
+        private readonly ConcurrentDictionary<Guid, int> _consumedCounts = new();
 
         public int GetPostReceiveCount(Guid messageId) =>
             _counts.TryGetValue(messageId, out var c) ? c : 0;
+
+        public int GetPostConsumeCount(Guid messageId) =>
+            _consumedCounts.TryGetValue(messageId, out var c) ? c : 0;
 
         public Task PreReceive(ReceiveContext context) => Task.CompletedTask;
 
@@ -401,7 +419,11 @@ public class WebhookDispatcherResilienceTests
         }
 
         public Task PostConsume<T>(ConsumeContext<T> context, TimeSpan duration, string consumerType) where T : class
-            => Task.CompletedTask;
+        {
+            if (context.MessageId.HasValue)
+                _consumedCounts.AddOrUpdate(context.MessageId.Value, 1, (_, c) => c + 1);
+            return Task.CompletedTask;
+        }
 
         public Task ConsumeFault<T>(ConsumeContext<T> context, TimeSpan duration, string consumerType, Exception exception) where T : class
             => Task.CompletedTask;

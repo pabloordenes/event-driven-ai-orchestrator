@@ -158,8 +158,8 @@ public class ResolutionTask
         string stepType = "FallbackNeedsHumanReview",
         string? metadataJson = null)
     {
-        if (Status != ResolutionStatus.Analyzing)
-            throw new InvalidOperationException("Solo se puede escalar a revisión humana desde el estado de análisis.");
+        if (Status is not (ResolutionStatus.Analyzing or ResolutionStatus.ActionProposed or ResolutionStatus.WaitingForExternalData))
+            throw new InvalidOperationException($"Solo se puede escalar a revisión humana desde estados Analyzing, ActionProposed o WaitingForExternalData (estado actual: '{Status}').");
 
         Status = ResolutionStatus.NeedsHumanReview;
         UpdatedAt = DateTime.UtcNow;
@@ -184,6 +184,16 @@ public class ResolutionTask
     public IReadOnlyList<ActionExecution> RegisterDeferredActions(
         IEnumerable<(string Endpoint, string PayloadJson, string IdempotencyKey)> actions)
     {
+        return RegisterDeferredActions(actions.Select(a => (
+            ActionType: "DEFERRED_WEBHOOK",
+            a.Endpoint,
+            a.PayloadJson,
+            a.IdempotencyKey)));
+    }
+
+    public IReadOnlyList<ActionExecution> RegisterDeferredActions(
+        IEnumerable<(string ActionType, string Endpoint, string PayloadJson, string IdempotencyKey)> actions)
+    {
         if (Status == ResolutionStatus.Failed)
             throw new InvalidOperationException($"No se pueden registrar acciones diferidas sobre la tarea {Id} en estado '{Status}'.");
 
@@ -195,7 +205,7 @@ public class ResolutionTask
         var newlyAdded = new List<ActionExecution>();
         int index = 0;
 
-        foreach (var (endpoint, payloadJson, idempotencyKey) in actions)
+        foreach (var (actionType, endpoint, payloadJson, idempotencyKey) in actions)
         {
             if (!string.IsNullOrWhiteSpace(endpoint) && !existingIndices.Contains(index))
             {
@@ -203,7 +213,7 @@ public class ResolutionTask
                     Id,
                     ActionExecutionPhase.Deferred,
                     index,
-                    "DEFERRED_WEBHOOK",
+                    string.IsNullOrWhiteSpace(actionType) ? "DEFERRED_WEBHOOK" : actionType.Trim(),
                     endpoint,
                     payloadJson,
                     idempotencyKey);

@@ -16,6 +16,7 @@ using Omro.Infrastructure.Configuration;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
 using Omro.Infrastructure.Tenants;
+using Omro.Infrastructure.Validation;
 
 namespace Omro.IntegrationTests;
 
@@ -160,6 +161,7 @@ public class TenantConfigProviderTests
         var shadowRepo = execScope.ServiceProvider.GetRequiredService<IShadowDecisionRepository>();
         var policyEngine = execScope.ServiceProvider.GetRequiredService<IPolicyEngine>();
         var planBuilder = execScope.ServiceProvider.GetRequiredService<IDeterministicPlanBuilder>();
+        var planValidator = execScope.ServiceProvider.GetRequiredService<IPlanValidator>();
         var coordinator = new ActionExecutionCoordinator(webhookMock.Object, uow, NullLogger<ActionExecutionCoordinator>.Instance);
         var handler = new IngestAnomalyCommandHandler(
             repo,
@@ -169,6 +171,7 @@ public class TenantConfigProviderTests
             configProvider,
             policyEngine,
             planBuilder,
+            planValidator,
             shadowRepo,
             NullLogger<IngestAnomalyCommandHandler>.Instance);
 
@@ -204,7 +207,8 @@ public class TenantConfigProviderTests
                 "custom-tenant",
                 "Custom Tenant",
                 "CUSTOM_DB_PROMPT_MARKER",
-                "custom-api");
+                "custom-api",
+                allowedEndpointHostsJson: "[\"https://custom.test\"]");
             tenant.AddAction(TenantAction.Create(
                 tenantId,
                 "NOTIFY_OPS",
@@ -262,6 +266,7 @@ public class TenantConfigProviderTests
         var shadowRepo = execScope.ServiceProvider.GetRequiredService<IShadowDecisionRepository>();
         var policyEngine = execScope.ServiceProvider.GetRequiredService<IPolicyEngine>();
         var planBuilder = execScope.ServiceProvider.GetRequiredService<IDeterministicPlanBuilder>();
+        var planValidator = execScope.ServiceProvider.GetRequiredService<IPlanValidator>();
         var coordinator = new ActionExecutionCoordinator(webhookMock.Object, uow, NullLogger<ActionExecutionCoordinator>.Instance);
         var handler = new IngestAnomalyCommandHandler(
             repo,
@@ -271,6 +276,7 @@ public class TenantConfigProviderTests
             configProvider,
             policyEngine,
             planBuilder,
+            planValidator,
             shadowRepo,
             NullLogger<IngestAnomalyCommandHandler>.Instance);
 
@@ -309,6 +315,7 @@ public class TenantConfigProviderTests
         services.AddScoped<ITenantSeedLoader, JsonTenantSeedLoader>();
         services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
         services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
+        services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
         services.AddLogging();
 
         return services.BuildServiceProvider();

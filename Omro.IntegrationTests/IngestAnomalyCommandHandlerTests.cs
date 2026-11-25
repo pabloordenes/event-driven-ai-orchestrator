@@ -20,6 +20,7 @@ using Omro.Infrastructure.Messaging.Observers;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
 using Omro.Infrastructure.Tenants;
+using Omro.Infrastructure.Validation;
 using Omro.Worker.Consumers;
 
 namespace Omro.IntegrationTests;
@@ -39,6 +40,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             options.UseInMemoryDatabase(sharedDbName));
         services.AddMemoryCache();
         services.Configure<TenantCacheOptions>(_ => { });
+        services.Configure<PlanValidationOptions>(_ => { });
 
         services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
         services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
@@ -50,6 +52,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
         services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
         services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
+        services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
 
         _webhookMock = new Moq.Mock<IWebhookDispatcher>();
         _webhookMock
@@ -178,10 +181,12 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
     [Fact]
     public async Task Should_Consume_ResolutionApproved_And_DispatchDeferredActionsWithIdempotencyKey()
     {
+        var tenantId = Guid.NewGuid();
+        await SeedTenantAsync(tenantId);
         var taskId = Guid.NewGuid();
         var resourceId = Guid.NewGuid();
         var approvedEvent = new ResolutionApproved(
-            TenantId: Guid.NewGuid(),
+            TenantId: tenantId,
             CorrelationId: Guid.NewGuid(),
             ResolutionTaskId: taskId,
             ResourceId: resourceId,
@@ -286,6 +291,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             new StubTenantConfigProvider(includeGenericPolicy: true),
             new JsonDecisionTablePolicyEngine(),
             new DeterministicPlanBuilder(),
+            new CatalogPlanValidator(),
             shadowRepo,
             NullLogger<IngestAnomalyCommandHandler>.Instance);
         var taskId = await cmdHandler.Handle(new IngestAnomalyCommand(Guid.NewGuid(), 0.91m, Guid.NewGuid()), CancellationToken.None);
@@ -331,6 +337,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             new StubTenantConfigProvider(includeGenericPolicy: false),
             new JsonDecisionTablePolicyEngine(),
             new DeterministicPlanBuilder(),
+            new CatalogPlanValidator(),
             shadowRepo,
             NullLogger<IngestAnomalyCommandHandler>.Instance);
 
@@ -430,6 +437,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             new StubTenantConfigProvider(includeGenericPolicy: true),
             new JsonDecisionTablePolicyEngine(),
             new DeterministicPlanBuilder(),
+            new CatalogPlanValidator(),
             shadowRepo,
             NullLogger<IngestAnomalyCommandHandler>.Instance);
 
@@ -469,7 +477,8 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             "Test Tenant",
             "Contexto de prueba cargado desde ITenantConfigProvider.",
             "tenant-api",
-            autonomousExecutionEnabled: true);
+            autonomousExecutionEnabled: true,
+            allowedEndpointHostsJson: "[\"https://medcare.test\"]");
         tenant.AddAction(TenantAction.Create(
             tenantId,
             "GENERATE_OVERBOOK",
@@ -477,6 +486,12 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             "https://medcare.test/api/appointments/overbook",
             defaultPayloadTemplateJson: "{\"resourceId\":\"{{resourceId}}\",\"reason\":\"{{policyReason}}\"}",
             llmEditableFieldsJson: "[\"reason\"]"));
+        tenant.AddAction(TenantAction.Create(
+            tenantId,
+            "MONITOR_RESOURCE",
+            "Acción diferida de monitoreo",
+            "https://medcare.test/api/appointments/monitor",
+            defaultPayloadTemplateJson: "{\"resourceId\":\"{{resourceId}}\",\"requiresAction\":true}"));
         tenant.AddPolicy(TenantPolicy.Create(
             tenantId,
             "AppointmentNoShowRisk",

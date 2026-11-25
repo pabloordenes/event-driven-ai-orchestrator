@@ -21,6 +21,7 @@ using Omro.Infrastructure.Messaging.Observers;
 using Omro.Infrastructure.Persistence;
 using Omro.Infrastructure.Persistence.Repositories;
 using Omro.Infrastructure.Tenants;
+using Omro.Infrastructure.Validation;
 using Omro.Worker.Consumers;
 
 namespace Omro.IntegrationTests;
@@ -379,6 +380,7 @@ public class ResolutionLifecycleAndCrashRecoveryTests
                 o.UseInMemoryDatabase(dbName).UseInternalServiceProvider(inMemoryProvider));
             services.AddMemoryCache();
             services.Configure<TenantCacheOptions>(_ => { });
+            services.Configure<PlanValidationOptions>(_ => { });
             services.AddScoped<IResolutionTaskRepository, ResolutionTaskRepository>();
             services.AddScoped<IActionExecutionRepository, ActionExecutionRepository>();
             services.AddScoped<ITenantConfigRepository, TenantConfigRepository>();
@@ -389,6 +391,7 @@ public class ResolutionLifecycleAndCrashRecoveryTests
             services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
             services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
             services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
+            services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
             services.AddSingleton(orchestrator);
 
             services.AddResilientWebhookHttpClient(
@@ -452,7 +455,8 @@ public class ResolutionLifecycleAndCrashRecoveryTests
                 "Test Tenant",
                 "Test prompt context",
                 "tenant-api",
-                autonomousExecutionEnabled: true);
+                autonomousExecutionEnabled: true,
+                allowedEndpointHostsJson: "[\"https://tenant.test\"]");
 
             tenant.AddAction(TenantAction.Create(
                 tenantId,
@@ -469,6 +473,13 @@ public class ResolutionLifecycleAndCrashRecoveryTests
                 defaultPayloadTemplateJson: "{\"resourceId\":\"{{resourceId}}\"}",
                 requiresApproval: true,
                 allowedPhases: TenantActionPhase.Immediate));
+
+            tenant.AddAction(TenantAction.Create(
+                tenantId,
+                "MONITOR_RESOURCE",
+                "Deferred monitor",
+                "https://tenant.test/api/appointments/monitor",
+                defaultPayloadTemplateJson: "{\"requiresAction\":true}"));
 
             tenant.AddPolicy(TenantPolicy.Create(
                 tenantId,
