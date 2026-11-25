@@ -28,9 +28,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Omro.Api\Omro.Api.csproj" />
     <ProjectReference Include="..\Omro.Worker\Omro.Worker.csproj" />
     <ProjectReference Include="..\Omro.Application\Omro.Application.csproj" />
     <ProjectReference Include="..\Omro.Infrastructure\Omro.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Fixtures\*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

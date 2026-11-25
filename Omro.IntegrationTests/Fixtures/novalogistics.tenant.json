@@ -1,0 +1,292 @@
+{
+  "tenantId": "22222222-2222-2222-2222-222222222222",
+  "tenantSlug": "nova-logistics",
+  "displayName": "NovaLogistics Freight",
+  "isActive": true,
+  "basePromptContext": "Eres el asistente operativo de logística para NovaLogistics Freight. La decisión, acción y endpoint son fijados exclusivamente por la tabla de decisiones y catálogo del tenant. Redacta título, justificación breve en español y completa únicamente 'dispatchNote' cuando esté permitido.",
+  "autonomousExecutionEnabled": false,
+  "featureFlags": {
+    "auto_reroute_enabled": false
+  },
+  "hitlProposalTtlMinutes": 120,
+  "hitlProposalMinLeadMinutes": 30,
+  "dedupWindowMinutes": 45,
+  "allowedEndpointHosts": [
+    "https://nova-ops.test"
+  ],
+  "auth": {
+    "scheme": "HmacSha256",
+    "issuer": "omro-orchestrator",
+    "audience": "nova-logistics-api",
+    "role": "omro_service",
+    "hmacSecretRef": "nova-hmac-secret"
+  },
+  "maxPayloadBytes": 65536,
+  "egressTimeoutSeconds": 15,
+  "llmConfig": {
+    "enrichmentEnabled": true,
+    "preferredProvider": "Groq"
+  },
+  "configVersion": 1,
+  "actions": [
+    {
+      "actionType": "REROUTE_SHIPMENT",
+      "description": "Reenruta un embarque hacia una ruta logística alterna cuando la política autoriza ejecución autónoma o tras aprobación HITL.",
+      "endpointUrl": "https://nova-ops.test/api/shipments/reroute",
+      "httpMethod": "PUT",
+      "requiresApproval": false,
+      "allowedPhases": "Both",
+      "schemaVersion": 1,
+      "llmEditableFields": [ "dispatchNote" ],
+      "retryPolicy": {
+        "maxRetryAttempts": 3,
+        "initialDelayMs": 1000,
+        "attemptTimeoutSeconds": 15,
+        "maxTotalAttempts": 12
+      },
+      "payloadSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [ "shipmentId", "executionMode" ],
+        "properties": {
+          "shipmentId": { "type": "string", "format": "uuid" },
+          "executionMode": { "type": "string", "enum": [ "Autonomous", "Approved" ] },
+          "dispatchNote": { "type": [ "string", "null" ], "maxLength": 400 },
+          "correlationId": { "type": [ "string", "null" ], "format": "uuid" },
+          "delayRisk": { "type": [ "number", "null" ], "minimum": 0, "maximum": 1 }
+        }
+      },
+      "defaultPayloadTemplate": {
+        "shipmentId": "{{resourceId}}",
+        "executionMode": "Autonomous",
+        "dispatchNote": "{{policyReason}}",
+        "correlationId": "{{correlationId}}",
+        "delayRisk": "{{riskProbability}}"
+      },
+      "isActive": true
+    },
+    {
+      "actionType": "REQUEST_DISPATCHER_APPROVAL",
+      "description": "Envía una propuesta de aprobación HITL v2 al centro de despacho de NovaLogistics antes de ejecutar acciones diferidas.",
+      "endpointUrl": "https://nova-ops.test/api/approvals/propose",
+      "httpMethod": "POST",
+      "requiresApproval": true,
+      "allowedPhases": "Immediate",
+      "schemaVersion": 2,
+      "llmEditableFields": [],
+      "retryPolicy": {
+        "maxRetryAttempts": 3,
+        "initialDelayMs": 1000,
+        "attemptTimeoutSeconds": 15,
+        "maxTotalAttempts": 12
+      },
+      "payloadSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": false,
+        "required": [ "schemaVersion", "shipmentId", "riskProbability", "aiPlan" ],
+        "properties": {
+          "schemaVersion": { "type": "string", "const": "2.0" },
+          "shipmentId": { "type": "string", "format": "uuid" },
+          "riskProbability": { "type": "number", "minimum": 0, "maximum": 1 },
+          "proposalExpiresAt": { "type": [ "string", "null" ], "format": "date-time" },
+          "aiPlan": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "schemaVersion", "title", "reasoning", "confidenceScore", "isShadowModeFallback", "deferredActions" ],
+            "properties": {
+              "schemaVersion": { "type": "string", "const": "2.0" },
+              "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "reasoning": { "type": "string", "minLength": 1, "maxLength": 1000 },
+              "confidenceScore": { "type": "number", "minimum": 0, "maximum": 1 },
+              "omroTaskId": { "type": [ "string", "null" ], "format": "uuid" },
+              "matchedRuleId": { "type": [ "string", "null" ], "maxLength": 200 },
+              "policyVersion": { "type": [ "integer", "null" ], "minimum": 1 },
+              "proposalExpiresAt": { "type": [ "string", "null" ], "format": "date-time" },
+              "isShadowModeFallback": { "type": "boolean" },
+              "deferredActions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [ "actionType", "endpoint", "httpMethod", "payload" ],
+                  "properties": {
+                    "actionType": { "type": "string", "minLength": 1, "maxLength": 100 },
+                    "endpoint": { "type": "string", "format": "uri" },
+                    "httpMethod": { "type": "string", "enum": [ "POST", "PUT", "PATCH" ] },
+                    "payload": { "type": "object" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "defaultPayloadTemplate": {
+        "schemaVersion": "2.0",
+        "shipmentId": "{{resourceId}}",
+        "riskProbability": "{{riskProbability}}",
+        "proposalExpiresAt": "{{proposalExpiresAt}}",
+        "aiPlan": "{{structuredAiPlan}}"
+      },
+      "isActive": true
+    }
+  ],
+  "policies": [
+    {
+      "anomalyType": "ShipmentDelayRisk",
+      "policyVersion": 1,
+      "isActive": true,
+      "dedupWindowMinutes": 45,
+      "decisionTable": {
+        "schemaVersion": "1.0",
+        "hitPolicy": "FIRST_MATCH",
+        "rules": [
+          {
+            "ruleId": "delay-customs-not-cleared",
+            "priority": 10,
+            "description": "Si aduana no está liberada, no reenrutar el embarque.",
+            "when": {
+              "field": "attributes.customs_cleared",
+              "op": "neq",
+              "value": "true",
+              "onMissing": true
+            },
+            "then": {
+              "outcome": "NoAction",
+              "escalateReason": "CUSTOMS_NOT_CLEARED",
+              "invokeLlmEnrichment": false,
+              "actions": []
+            }
+          },
+          {
+            "ruleId": "delay-low-risk-no-action",
+            "priority": 20,
+            "description": "Riesgo de retraso bajo [0.00, 0.50): sin intervención.",
+            "when": {
+              "all": [
+                {
+                  "field": "riskProbability",
+                  "op": "range_half_open",
+                  "minInclusive": 0.00,
+                  "maxExclusive": 0.50
+                }
+              ]
+            },
+            "then": {
+              "outcome": "NoAction",
+              "invokeLlmEnrichment": false,
+              "actions": []
+            }
+          },
+          {
+            "ruleId": "delay-critical-autonomous-with-shadow-gate",
+            "priority": 30,
+            "description": "Riesgo crítico [0.85, 1.00], aduana liberada, carga no hazmat y retraso >= 4h.",
+            "when": {
+              "all": [
+                {
+                  "field": "riskProbability",
+                  "op": "range_closed",
+                  "minInclusive": 0.85,
+                  "maxInclusive": 1.00
+                },
+                {
+                  "field": "attributes.customs_cleared",
+                  "op": "eq",
+                  "value": "true",
+                  "onMissing": false
+                },
+                {
+                  "field": "attributes.cargo_tier",
+                  "op": "neq",
+                  "value": "hazmat",
+                  "onMissing": true
+                },
+                {
+                  "field": "attributes.delay_hours",
+                  "op": "gte",
+                  "value": 4,
+                  "onMissing": false
+                }
+              ]
+            },
+            "then": {
+              "outcome": "ExecuteActions",
+              "expectsExternalApproval": false,
+              "invokeLlmEnrichment": true,
+              "actions": [
+                {
+                  "actionType": "REROUTE_SHIPMENT",
+                  "payloadOverrides": { "executionMode": "Autonomous" }
+                }
+              ],
+              "autonomyGate": {
+                "requiresTenantAutonomousExecution": true,
+                "requiredEventAttributeNotFalse": "auto_reroute_enabled",
+                "suppressionReason": "AUTONOMOUS_EXECUTION_DISABLED",
+                "recordShadowDecision": true,
+                "fallbackOutcome": "ProposeForApproval",
+                "fallbackExpectsExternalApproval": true,
+                "fallbackActions": [
+                  {
+                    "actionType": "REQUEST_DISPATCHER_APPROVAL",
+                    "deferredActions": [
+                      {
+                        "actionType": "REROUTE_SHIPMENT",
+                        "payloadOverrides": { "executionMode": "Approved" }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "ruleId": "delay-moderate-or-hazmat-hitl",
+            "priority": 40,
+            "description": "Riesgo moderado [0.50, 0.85) o carga hazmat / retraso < 4h -> propuesta HITL al despachador.",
+            "when": {
+              "any": [
+                {
+                  "field": "riskProbability",
+                  "op": "range_half_open",
+                  "minInclusive": 0.50,
+                  "maxExclusive": 0.85
+                },
+                {
+                  "field": "riskProbability",
+                  "op": "gte",
+                  "value": 0.85
+                }
+              ]
+            },
+            "then": {
+              "outcome": "ProposeForApproval",
+              "expectsExternalApproval": true,
+              "invokeLlmEnrichment": true,
+              "actions": [
+                {
+                  "actionType": "REQUEST_DISPATCHER_APPROVAL",
+                  "deferredActions": [
+                    {
+                      "actionType": "REROUTE_SHIPMENT",
+                      "payloadOverrides": { "executionMode": "Approved" }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ],
+        "defaultDecision": {
+          "outcome": "EscalateToHumanReview",
+          "reason": "NO_MATCHING_POLICY_RULE",
+          "invokeLlmEnrichment": false,
+          "actions": []
+        }
+      }
+    }
+  ]
+}

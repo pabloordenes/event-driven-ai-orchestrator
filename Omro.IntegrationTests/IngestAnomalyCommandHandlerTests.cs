@@ -1,4 +1,5 @@
-﻿using FluentAssertions;
+﻿using System.Text.Json;
+using FluentAssertions;
 using MassTransit;
 using MassTransit.Testing;
 using Microsoft.EntityFrameworkCore;
@@ -12,6 +13,7 @@ using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Application.ResolutionTasks.Services;
 using Omro.Application.Tenants;
 using Omro.Contracts.Events;
+using Omro.Contracts.Plans;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
 using Omro.Domain.Tenants;
@@ -51,6 +53,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         services.AddScoped<IUnitOfWork, UnitOfWork>();
         services.AddScoped<IMessageInboxStore, EfMessageInboxStore>();
         services.AddSingleton<ITenantConfigProvider, CachedTenantConfigProvider>();
+        services.AddScoped<ITenantSeedLoader, JsonTenantSeedLoader>();
         services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
         services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
         services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
@@ -240,6 +243,167 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
             Moq.It.IsAny<WebhookDispatchOptions?>()), Moq.Times.Once);
     }
 
+    [Fact]
+    public async Task ConfirmationDeadlineMissed_WithAutoOverbookOff_ShouldRecordShadowDecision_ProposeV2_AndExecuteOnV2Approval()
+    {
+        var medCareTenantId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        await SeedFromMedCareFileAsync(autonomousExecutionEnabled: false);
+
+        var resourceId = Guid.NewGuid();
+        var anomaly = new AnomalyDetected(
+            TenantId: medCareTenantId,
+            CorrelationId: Guid.NewGuid(),
+            AnomalyType: "ConfirmationDeadlineMissed",
+            ResourceId: resourceId,
+            RiskProbability: 0.90m,
+            Attributes: new Dictionary<string, string>
+            {
+                ["final_notice_status"] = "Delivered",
+                ["clinical_flags"] = string.Empty,
+                ["auto_overbook_enabled"] = "true"
+            });
+
+        await _harness.Bus.Publish(anomaly);
+
+        var anomalyConsumerHarness = _harness.GetConsumerHarness<AnomalyEventConsumer>();
+        (await anomalyConsumerHarness.Consumed.Any<AnomalyDetected>(
+            c => c.Context.Message.ResourceId == resourceId && c.Exception is null)).Should().BeTrue();
+
+        Guid taskId;
+        using (var scope = _provider.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var task = await db.ResolutionTasks
+                .Include(t => t.ActionExecutions)
+                .FirstOrDefaultAsync(t => t.TenantId == medCareTenantId && t.Anomaly.ResourceId == resourceId);
+
+            task.Should().NotBeNull();
+            task!.Status.Should().Be(ResolutionStatus.WaitingForExternalData);
+            task.ExpectsExternalApproval.Should().BeTrue();
+            task.ProposalExpiresAt.Should().NotBeNull();
+            taskId = task.Id;
+
+            var shadow = await db.ShadowDecisions.FirstOrDefaultAsync(s => s.ResolutionTaskId == taskId);
+            shadow.Should().NotBeNull();
+            shadow!.IntendedActionType.Should().Be("GENERATE_OVERBOOK");
+            shadow.ActualActionType.Should().Be("PROPOSE_RESOLUTION");
+        }
+
+        var proposeInvocation = _webhookMock.Invocations.Should().ContainSingle(inv =>
+            inv.Method.Name == nameof(IWebhookDispatcher.DispatchAsync) &&
+            Equals(inv.Arguments[4], taskId)).Subject;
+
+        proposeInvocation.Arguments[0].Should().Be("https://medcare.test/api/resolutions/propose");
+        var idempotencyKey = proposeInvocation.Arguments[3] as string;
+        idempotencyKey.Should().NotBeNullOrWhiteSpace();
+        idempotencyKey!.Length.Should().BeLessThanOrEqualTo(100);
+
+        var proposePayload = (Dictionary<string, object>)proposeInvocation.Arguments[1]!;
+        ((JsonElement)proposePayload["schemaVersion"]).GetString().Should().Be(PlanContractVersions.V2Structured);
+        ((JsonElement)proposePayload["proposalExpiresAt"]).GetDateTimeOffset().Should().BeAfter(DateTimeOffset.UtcNow.AddMinutes(150));
+
+        var aiPlanElement = (JsonElement)proposePayload["aiPlan"];
+        aiPlanElement.ValueKind.Should().Be(JsonValueKind.Object);
+        var structuredPlan = JsonSerializer.Deserialize<StructuredAiPlan>(
+            aiPlanElement.GetRawText(),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        structuredPlan.Should().NotBeNull();
+        structuredPlan!.Title.Should().Be("Plan Enriquecido por FakeLLM");
+        structuredPlan.OmroTaskId.Should().Be(taskId);
+        structuredPlan.IsShadowModeFallback.Should().BeTrue();
+        structuredPlan.DeferredActions.Should().ContainSingle(a => a.ActionType == "GENERATE_OVERBOOK");
+
+        // Aprobación HITL con contrato v2 nativo (AiPlanJson == null)
+        var approvalCorrelation = Guid.NewGuid();
+        await _harness.Bus.Publish(new ResolutionApproved(
+            TenantId: medCareTenantId,
+            CorrelationId: approvalCorrelation,
+            ResolutionTaskId: Guid.NewGuid(),
+            ResourceId: resourceId,
+            AiPlanJson: null,
+            SchemaVersion: PlanContractVersions.V2Structured,
+            AiPlan: structuredPlan));
+
+        var approvedConsumerHarness = _harness.GetConsumerHarness<ResolutionApprovedConsumer>();
+        (await approvedConsumerHarness.Consumed.Any<ResolutionApproved>(
+            c => c.Context.Message.CorrelationId == approvalCorrelation && c.Exception is null)).Should().BeTrue();
+
+        var overbookInvocation = _webhookMock.Invocations.Should().ContainSingle(inv =>
+            inv.Method.Name == nameof(IWebhookDispatcher.DispatchAsync) &&
+            Equals(inv.Arguments[0], "https://medcare.test/api/appointments/overbook") &&
+            Equals(inv.Arguments[4], taskId)).Subject;
+
+        var deferredKey = overbookInvocation.Arguments[3] as string;
+        deferredKey.Should().NotBeNullOrWhiteSpace();
+        deferredKey!.Length.Should().BeLessThanOrEqualTo(100);
+        deferredKey.Should().NotBe(idempotencyKey);
+
+        var overbookPayload = (Dictionary<string, object>)overbookInvocation.Arguments[1]!;
+        ((JsonElement)overbookPayload["decisionMode"]).GetString().Should().Be("Approved");
+
+        using (var scope = _provider.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var resolved = await db.ResolutionTasks.FirstAsync(t => t.Id == taskId);
+            resolved.Status.Should().Be(ResolutionStatus.Resolved);
+        }
+    }
+
+    [Fact]
+    public async Task ConfirmationDeadlineMissed_WithAutoOverbookOn_ShouldExecuteAutonomousOverbook_AndBlockLlmHijack()
+    {
+        var medCareTenantId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        await SeedFromMedCareFileAsync(autonomousExecutionEnabled: true);
+
+        var resourceId = Guid.NewGuid();
+        var anomaly = new AnomalyDetected(
+            TenantId: medCareTenantId,
+            CorrelationId: Guid.NewGuid(),
+            AnomalyType: "ConfirmationDeadlineMissed",
+            ResourceId: resourceId,
+            RiskProbability: 0.92m,
+            Attributes: new Dictionary<string, string>
+            {
+                ["final_notice_status"] = "Delivered",
+                ["clinical_flags"] = string.Empty
+            });
+
+        await _harness.Bus.Publish(anomaly);
+
+        var anomalyConsumerHarness = _harness.GetConsumerHarness<AnomalyEventConsumer>();
+        (await anomalyConsumerHarness.Consumed.Any<AnomalyDetected>(
+            c => c.Context.Message.ResourceId == resourceId && c.Exception is null)).Should().BeTrue();
+
+        Guid taskId;
+        using (var scope = _provider.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var task = await db.ResolutionTasks.FirstOrDefaultAsync(
+                t => t.TenantId == medCareTenantId && t.Anomaly.ResourceId == resourceId);
+
+            task.Should().NotBeNull();
+            task!.Status.Should().Be(ResolutionStatus.Resolved);
+            taskId = task.Id;
+
+            (await db.ShadowDecisions.CountAsync(s => s.ResolutionTaskId == taskId)).Should().Be(0);
+        }
+
+        _webhookMock.Invocations.Should().NotContain(inv =>
+            inv.Method.Name == nameof(IWebhookDispatcher.DispatchAsync) &&
+            Equals(inv.Arguments[0], "https://evil.attacker.test/steal"));
+
+        var overbookInvocation = _webhookMock.Invocations.Should().ContainSingle(inv =>
+            inv.Method.Name == nameof(IWebhookDispatcher.DispatchAsync) &&
+            Equals(inv.Arguments[4], taskId)).Subject;
+
+        overbookInvocation.Arguments[0].Should().Be("https://medcare.test/api/appointments/overbook");
+        var overbookPayload = (Dictionary<string, object>)overbookInvocation.Arguments[1]!;
+        ((JsonElement)overbookPayload["decisionMode"]).GetString().Should().Be("Autonomous");
+        ((JsonElement)overbookPayload["reason"]).GetString().Should().Be("Justificación enriquecida por FakeLLM");
+        overbookPayload.Should().NotContainKey("extraForbiddenField");
+    }
+
     public class FakeCognitiveOrchestrator : ICognitiveOrchestrator
     {
         public Task<(CognitivePlan Plan, int PromptTokens, int CompletionTokens)> ProposeResolutionAsync(
@@ -252,13 +416,19 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
                 {
                     new(
                         "GENERATE_OVERBOOK",
-                        "https://medcare.test/api/appointments/overbook",
-                        new Dictionary<string, object> { ["resourceId"] = anomaly.ResourceId })
+                        "https://evil.attacker.test/steal",
+                        new Dictionary<string, object>
+                        {
+                            ["resourceId"] = anomaly.ResourceId,
+                            ["reason"] = "Justificación enriquecida por FakeLLM",
+                            ["decisionMode"] = "Hacked",
+                            ["extraForbiddenField"] = "inject"
+                        })
                 }
                 : new List<ProposedAction>();
 
             var dummyPlan = new CognitivePlan(
-                Title: "Acción Simulada",
+                Title: "Plan Enriquecido por FakeLLM",
                 Reasoning: "Porque es un test automatizado",
                 ConfidenceScore: 0.99m,
                 ProposedActions: actions
@@ -552,6 +722,28 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
 
         db.TenantConfigs.Add(tenant);
         await db.SaveChangesAsync();
+    }
+
+    private async Task SeedFromMedCareFileAsync(bool autonomousExecutionEnabled)
+    {
+        var seedPath = Path.Combine(AppContext.BaseDirectory, "Seeds", "medcare.tenant.json");
+        var json = (await File.ReadAllTextAsync(seedPath))
+            .Replace("${OMRO_SEED_MEDCARE_BASE_URL:-https://medcare-cqrs-clinical-api.onrender.com}", "https://medcare.test", StringComparison.Ordinal);
+
+        using var scope = _provider.CreateScope();
+        var loader = scope.ServiceProvider.GetRequiredService<ITenantSeedLoader>();
+        await loader.SeedFromJsonAsync(json);
+
+        var medCareTenantId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var entity = await db.TenantConfigs.FirstAsync(t => t.TenantId == medCareTenantId);
+        if (entity.AutonomousExecutionEnabled != autonomousExecutionEnabled)
+        {
+            entity.SetAutonomousExecution(autonomousExecutionEnabled);
+            await db.SaveChangesAsync();
+        }
+
+        _provider.GetRequiredService<ITenantConfigProvider>().Invalidate(medCareTenantId);
     }
 
     private sealed class StubTenantConfigProvider : ITenantConfigProvider
