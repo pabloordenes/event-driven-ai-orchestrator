@@ -74,7 +74,7 @@
       "httpMethod": "POST",
       "requiresApproval": true,
       "allowedPhases": "Immediate",
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "llmEditableFields": [],
       "retryPolicy": {
         "maxRetryAttempts": 3,
@@ -86,17 +86,50 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "additionalProperties": false,
-        "required": [ "resourceId", "riskProbability", "aiPlanJson" ],
+        "required": [ "schemaVersion", "resourceId", "riskProbability", "aiPlan" ],
         "properties": {
+          "schemaVersion": { "type": "string", "const": "2.0" },
           "resourceId": { "type": "string", "format": "uuid" },
           "riskProbability": { "type": "number", "minimum": 0, "maximum": 1 },
-          "aiPlanJson": { "type": "string", "minLength": 2, "maxLength": 32768 }
+          "proposalExpiresAt": { "type": [ "string", "null" ], "format": "date-time" },
+          "aiPlan": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "schemaVersion", "title", "reasoning", "confidenceScore", "isShadowModeFallback", "deferredActions" ],
+            "properties": {
+              "schemaVersion": { "type": "string", "const": "2.0" },
+              "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "reasoning": { "type": "string", "minLength": 1, "maxLength": 1000 },
+              "confidenceScore": { "type": "number", "minimum": 0, "maximum": 1 },
+              "omroTaskId": { "type": [ "string", "null" ], "format": "uuid" },
+              "matchedRuleId": { "type": [ "string", "null" ], "maxLength": 200 },
+              "policyVersion": { "type": [ "integer", "null" ], "minimum": 1 },
+              "proposalExpiresAt": { "type": [ "string", "null" ], "format": "date-time" },
+              "isShadowModeFallback": { "type": "boolean" },
+              "deferredActions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [ "actionType", "endpoint", "httpMethod", "payload" ],
+                  "properties": {
+                    "actionType": { "type": "string", "minLength": 1, "maxLength": 100 },
+                    "endpoint": { "type": "string", "format": "uri" },
+                    "httpMethod": { "type": "string", "enum": [ "POST", "PUT", "PATCH" ] },
+                    "payload": { "type": "object" }
+                  }
+                }
+              }
+            }
+          }
         }
       },
       "defaultPayloadTemplate": {
+        "schemaVersion": "2.0",
         "resourceId": "{{resourceId}}",
         "riskProbability": "{{riskProbability}}",
-        "aiPlanJson": "{{deferredPlanJson}}"
+        "proposalExpiresAt": "{{proposalExpiresAt}}",
+        "aiPlan": "{{structuredAiPlan}}"
       },
       "isActive": true
     },

@@ -179,6 +179,100 @@ public class DeterministicPlanBuilderTests
         mergedAction.Payload["reason"].Should().Be("Motivo enriquecido por LLM");
     }
 
+    [Fact]
+    public void BuildBasePlan_AndMergeLlmEnrichment_ShouldRenderNativeV2StructuredAiPlanWithoutEscapedJson()
+    {
+        var baseTenant = CreateTenantWithCatalog();
+        var v2Actions = new Dictionary<string, TenantActionDescriptor>(baseTenant.Actions, StringComparer.OrdinalIgnoreCase)
+        {
+            ["PROPOSE_RESOLUTION"] = baseTenant.Actions["PROPOSE_RESOLUTION"] with
+            {
+                SchemaVersion = 2,
+                DefaultPayloadTemplateJson = """
+                {
+                  "schemaVersion": "2.0",
+                  "resourceId": "{{resourceId}}",
+                  "riskProbability": "{{riskProbability}}",
+                  "proposalExpiresAt": "{{proposalExpiresAt}}",
+                  "aiPlan": "{{structuredAiPlan}}"
+                }
+                """
+            }
+        };
+        var tenant = baseTenant with { Actions = v2Actions };
+
+        var resourceId = Guid.NewGuid();
+        var taskId = Guid.NewGuid();
+        var expiresAt = new DateTimeOffset(2026, 11, 25, 19, 30, 0, TimeSpan.Zero);
+        var anomaly = new AnomalyEvent(0.76m, resourceId, "GenericDelayRisk", Guid.NewGuid());
+
+        var decision = new PolicyDecision(
+            Outcome: PolicyOutcome.ProposeForApproval,
+            PolicyId: Guid.NewGuid(),
+            PolicyVersion: 3,
+            MatchedRuleId: "v2-hitl-rule",
+            Reason: "Base deterministic reason",
+            ExpectsExternalApproval: true,
+            InvokeLlmEnrichment: true,
+            ProposalExpiresAt: expiresAt,
+            Actions:
+            [
+                new PolicyPlannedAction(
+                    "PROPOSE_RESOLUTION",
+                    new Dictionary<string, JsonElement>(),
+                    [
+                        new PolicyPlannedAction(
+                            "EXECUTE_MITIGATION",
+                            new Dictionary<string, JsonElement>
+                            {
+                                ["decisionMode"] = JsonSerializer.SerializeToElement("Approved")
+                            },
+                            Array.Empty<PolicyPlannedAction>())
+                    ])
+            ],
+            ShadowIntent: null,
+            EvaluationSnapshotJson: "{}");
+
+        var buildResult = _builder.BuildBasePlan(tenant, anomaly, null, decision, taskId);
+        buildResult.IsSuccess.Should().BeTrue();
+
+        var baseAction = buildResult.Plan!.ProposedActions.Should().ContainSingle().Subject;
+        baseAction.Payload.Should().NotContainKey("aiPlanJson");
+        baseAction.Payload["schemaVersion"].Should().Be("2.0");
+
+        var aiPlanObj = baseAction.Payload["aiPlan"].Should().BeAssignableTo<IDictionary<string, object>>().Subject;
+        aiPlanObj["schemaVersion"].Should().Be("2.0");
+        aiPlanObj["omroTaskId"].Should().Be(taskId.ToString());
+        aiPlanObj["matchedRuleId"].Should().Be("v2-hitl-rule");
+        aiPlanObj["policyVersion"].Should().Be(3L);
+        aiPlanObj["isShadowModeFallback"].Should().Be(false);
+
+        var llmEnrichment = new CognitivePlan(
+            Title: "Título enriquecido por LLM",
+            Reasoning: "Explicación clara enriquecida para operador.",
+            ConfidenceScore: 0.92m,
+            ProposedActions:
+            [
+                new ProposedAction("PROPOSE_RESOLUTION", "https://evil.attacker/steal", new Dictionary<string, object>())
+            ],
+            IsFallback: false,
+            ExpectsExternalApproval: false);
+
+        var merged = _builder.MergeLlmEnrichment(tenant, decision, buildResult.Plan, llmEnrichment);
+        var mergedAiPlan = merged.ProposedActions[0].Payload["aiPlan"].Should().BeAssignableTo<IDictionary<string, object>>().Subject;
+        mergedAiPlan["title"].Should().Be("Título enriquecido por LLM");
+        mergedAiPlan["reasoning"].Should().Be("Explicación clara enriquecida para operador.");
+        mergedAiPlan["confidenceScore"].Should().Be(0.92m);
+        mergedAiPlan["omroTaskId"].Should().Be(taskId.ToString());
+
+        var serializedPayload = JsonSerializer.Serialize(merged.ProposedActions[0].Payload);
+        using var doc = JsonDocument.Parse(serializedPayload);
+        doc.RootElement.GetProperty("aiPlan").ValueKind.Should().Be(JsonValueKind.Object);
+        doc.RootElement.GetProperty("aiPlan").GetProperty("deferredActions").GetArrayLength().Should().Be(1);
+        doc.RootElement.GetProperty("aiPlan").GetProperty("deferredActions")[0]
+            .GetProperty("endpoint").GetString().Should().Be("https://tenant.test/api/mitigate");
+    }
+
     private static TenantConfiguration CreateTenantWithCatalog()
     {
         var actions = new Dictionary<string, TenantActionDescriptor>(StringComparer.OrdinalIgnoreCase)

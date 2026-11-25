@@ -9,6 +9,7 @@ public class ResolutionTask
     public ResolutionStatus Status { get; private set; }
     public AnomalyEvent Anomaly { get; private set; }
     public bool ExpectsExternalApproval { get; private set; }
+    public DateTimeOffset? ProposalExpiresAt { get; private set; }
     public DateTime CreatedAt { get; private set; }
     public DateTime UpdatedAt { get; private set; }
     public DateTime? ResolvedAt { get; private set; }
@@ -55,13 +56,15 @@ public class ResolutionTask
         int promptTokens,
         int completionTokens,
         string agentName = "CognitiveOrchestrator",
-        string? traceSummary = null)
+        string? traceSummary = null,
+        DateTimeOffset? proposalExpiresAt = null)
     {
         if (Status != ResolutionStatus.Analyzing)
             throw new InvalidOperationException("Solo se pueden proponer planes en estado de análisis.");
 
         Status = ResolutionStatus.ActionProposed;
         ExpectsExternalApproval = plan.ExpectsExternalApproval;
+        ProposalExpiresAt = plan.ExpectsExternalApproval ? proposalExpiresAt : null;
         UpdatedAt = DateTime.UtcNow;
 
         if (plan.ProposedActions is { Count: > 0 })

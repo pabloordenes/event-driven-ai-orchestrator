@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
+using Omro.Application.Contracts;
 using Omro.Application.Interfaces;
 using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
@@ -53,6 +54,7 @@ public class IngestAnomalyCommandHandlerTests : IAsyncLifetime
         services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
         services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
         services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
+        services.AddSingleton<IAiPlanContractParser, AiPlanContractParser>();
 
         _webhookMock = new Moq.Mock<IWebhookDispatcher>();
         _webhookMock

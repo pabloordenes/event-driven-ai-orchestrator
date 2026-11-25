@@ -3,12 +3,15 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Omro.Application.Interfaces;
 using Omro.Application.Tenants;
+using Omro.Contracts.Plans;
 using Omro.Domain.ResolutionTasks;
 
 namespace Omro.Application.Policies;
 
 public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
 {
+    private static readonly JsonSerializerOptions WebJsonOptions = new(JsonSerializerDefaults.Web);
+
     public DeterministicPlanBuildResult BuildBasePlan(
         TenantConfiguration tenant,
         AnomalyEvent anomaly,
@@ -21,7 +24,12 @@ public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
         ArgumentNullException.ThrowIfNull(decision);
 
         var proposedActions = new List<ProposedAction>(decision.Actions.Count);
-        var defaultTitle = $"{anomaly.AnomalyType} - {decision.MatchedRuleId}";
+        var defaultTitle = Truncate($"{anomaly.AnomalyType} - {decision.MatchedRuleId}", 200);
+        var effectiveReason = Truncate(
+            string.IsNullOrWhiteSpace(decision.Reason)
+                ? "Decisión generada por política."
+                : decision.Reason.Trim(),
+            1000);
 
         foreach (var planned in decision.Actions)
         {
@@ -34,9 +42,13 @@ public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
             }
 
             string? deferredPlanJson = null;
-            if (planned.DeferredActions.Count > 0)
+            JsonNode? structuredAiPlanNode = null;
+
+            if (planned.DeferredActions.Count > 0 || decision.ExpectsExternalApproval)
             {
                 var deferredList = new List<object>(planned.DeferredActions.Count);
+                var deferredContracts = new List<DeferredActionContract>(planned.DeferredActions.Count);
+
                 foreach (var deferredPlanned in planned.DeferredActions)
                 {
                     if (!tenant.TryGetAction(deferredPlanned.ActionType, out var deferredDescriptor))
@@ -54,7 +66,8 @@ public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
                         attributes,
                         decision,
                         omroTaskId,
-                        deferredPlanJson: null);
+                        deferredPlanJson: null,
+                        structuredAiPlanNode: null);
 
                     deferredList.Add(new
                     {
@@ -63,21 +76,44 @@ public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
                         HttpMethod = deferredDescriptor.HttpMethod,
                         Payload = deferredPayload
                     });
+
+                    deferredContracts.Add(new DeferredActionContract(
+                        ActionType: deferredDescriptor.ActionType,
+                        Endpoint: deferredDescriptor.EndpointUrl,
+                        HttpMethod: deferredDescriptor.HttpMethod,
+                        Payload: JsonSerializer.SerializeToElement(deferredPayload, WebJsonOptions)));
                 }
 
-                var deferredEnvelope = new
-                {
-                    SchemaVersion = "1.0",
-                    Title = defaultTitle,
-                    Reasoning = decision.Reason,
-                    MatchedRuleId = decision.MatchedRuleId,
-                    PolicyVersion = decision.PolicyVersion,
-                    ProposalExpiresAt = decision.ProposalExpiresAt,
-                    IsShadowModeFallback = decision.ShadowIntent is not null,
-                    DeferredActions = deferredList
-                };
+                var structuredPlan = new StructuredAiPlan(
+                    SchemaVersion: PlanContractVersions.V2Structured,
+                    Title: defaultTitle,
+                    Reasoning: effectiveReason,
+                    ConfidenceScore: 1.0m,
+                    OmroTaskId: omroTaskId,
+                    MatchedRuleId: decision.MatchedRuleId,
+                    PolicyVersion: decision.PolicyVersion,
+                    ProposalExpiresAt: decision.ProposalExpiresAt,
+                    IsShadowModeFallback: decision.ShadowIntent is not null,
+                    DeferredActions: deferredContracts);
 
-                deferredPlanJson = JsonSerializer.Serialize(deferredEnvelope);
+                structuredAiPlanNode = JsonSerializer.SerializeToNode(structuredPlan, WebJsonOptions);
+
+                if (planned.DeferredActions.Count > 0)
+                {
+                    var deferredEnvelope = new
+                    {
+                        SchemaVersion = PlanContractVersions.V1Legacy,
+                        Title = defaultTitle,
+                        Reasoning = effectiveReason,
+                        MatchedRuleId = decision.MatchedRuleId,
+                        PolicyVersion = decision.PolicyVersion,
+                        ProposalExpiresAt = decision.ProposalExpiresAt,
+                        IsShadowModeFallback = decision.ShadowIntent is not null,
+                        DeferredActions = deferredList
+                    };
+
+                    deferredPlanJson = JsonSerializer.Serialize(deferredEnvelope);
+                }
             }
 
             var renderedPayload = RenderPayload(
@@ -87,7 +123,8 @@ public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
                 attributes,
                 decision,
                 omroTaskId,
-                deferredPlanJson);
+                deferredPlanJson,
+                structuredAiPlanNode);
 
             proposedActions.Add(new ProposedAction(
                 ActionType: actionDescriptor.ActionType,
@@ -97,7 +134,7 @@ public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
 
         var plan = new CognitivePlan(
             Title: defaultTitle,
-            Reasoning: decision.Reason,
+            Reasoning: effectiveReason,
             ConfidenceScore: 1.0m,
             ProposedActions: proposedActions,
             IsFallback: false,
@@ -162,15 +199,25 @@ public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
                 }
             }
 
-            if (mergedPayload.TryGetValue("aiPlanJson", out var aiPlanObj) &&
+            if (TryGetIgnoreCase(mergedPayload, "aiPlanJson", out var aiPlanObj) &&
                 aiPlanObj is string aiPlanJsonStr &&
                 !string.IsNullOrWhiteSpace(aiPlanJsonStr))
             {
                 var updatedAiPlanJson = EnrichDeferredEnvelopeText(aiPlanJsonStr, enrichedTitle, enrichedReasoning);
                 if (updatedAiPlanJson is not null)
                 {
-                    mergedPayload["aiPlanJson"] = updatedAiPlanJson;
+                    mergedPayload[FindExistingKeyOrDefault(mergedPayload, "aiPlanJson")] = updatedAiPlanJson;
                 }
+            }
+
+            if (TryGetIgnoreCase(mergedPayload, "aiPlan", out var aiPlanDictObj) &&
+                aiPlanDictObj is IDictionary<string, object> aiPlanDict)
+            {
+                var updatedAiPlanDict = new Dictionary<string, object>(aiPlanDict, StringComparer.Ordinal);
+                updatedAiPlanDict[FindExistingKeyOrDefault(updatedAiPlanDict, "title")] = enrichedTitle;
+                updatedAiPlanDict[FindExistingKeyOrDefault(updatedAiPlanDict, "reasoning")] = enrichedReasoning;
+                updatedAiPlanDict[FindExistingKeyOrDefault(updatedAiPlanDict, "confidenceScore")] = enrichedConfidence;
+                mergedPayload[FindExistingKeyOrDefault(mergedPayload, "aiPlan")] = updatedAiPlanDict;
             }
 
             enrichedActions.Add(new ProposedAction(
@@ -195,7 +242,8 @@ public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
         IReadOnlyDictionary<string, string>? attributes,
         PolicyDecision decision,
         Guid omroTaskId,
-        string? deferredPlanJson)
+        string? deferredPlanJson,
+        JsonNode? structuredAiPlanNode)
     {
         var rootNode = JsonNode.Parse(templateJson)?.AsObject() ?? new JsonObject();
         var renderedNode = SubstitutePlaceholders(
@@ -204,7 +252,8 @@ public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
             attributes,
             decision,
             omroTaskId,
-            deferredPlanJson)!.AsObject();
+            deferredPlanJson,
+            structuredAiPlanNode)!.AsObject();
 
         var result = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         foreach (var kvp in renderedNode)
@@ -236,7 +285,8 @@ public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
         IReadOnlyDictionary<string, string>? attributes,
         PolicyDecision decision,
         Guid omroTaskId,
-        string? deferredPlanJson)
+        string? deferredPlanJson,
+        JsonNode? structuredAiPlanNode)
     {
         switch (node)
         {
@@ -251,7 +301,8 @@ public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
                         attributes,
                         decision,
                         omroTaskId,
-                        deferredPlanJson);
+                        deferredPlanJson,
+                        structuredAiPlanNode);
                 }
                 return clone;
             }
@@ -266,12 +317,16 @@ public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
                         attributes,
                         decision,
                         omroTaskId,
-                        deferredPlanJson));
+                        deferredPlanJson,
+                        structuredAiPlanNode));
                 }
                 return clone;
             }
             case JsonValue val when val.TryGetValue<string>(out var rawStr):
             {
+                if (string.Equals(rawStr, "{{structuredAiPlan}}", StringComparison.Ordinal))
+                    return structuredAiPlanNode?.DeepClone();
+
                 if (string.Equals(rawStr, "{{riskProbability}}", StringComparison.Ordinal))
                     return JsonValue.Create(anomaly.RiskProbability);
 
@@ -362,7 +417,9 @@ public sealed class DeterministicPlanBuilder : IDeterministicPlanBuilder
         JsonValueKind.String => element.GetString(),
         JsonValueKind.True => true,
         JsonValueKind.False => false,
-        JsonValueKind.Number => element.TryGetDecimal(out var d) ? d : element.GetDouble(),
+        JsonValueKind.Number => element.TryGetInt64(out var l)
+            ? l
+            : (element.TryGetDecimal(out var d) ? d : element.GetDouble()),
         JsonValueKind.Null or JsonValueKind.Undefined => null,
         JsonValueKind.Object => element.EnumerateObject()
             .ToDictionary(p => p.Name, p => ConvertElementToClr(p.Value)!, StringComparer.Ordinal),

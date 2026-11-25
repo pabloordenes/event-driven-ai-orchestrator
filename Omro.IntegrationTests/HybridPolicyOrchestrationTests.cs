@@ -9,11 +9,13 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Omro.Application.Contracts;
 using Omro.Application.Interfaces;
 using Omro.Application.Policies;
 using Omro.Application.ResolutionTasks.Commands.IngestAnomaly;
 using Omro.Application.ResolutionTasks.Services;
 using Omro.Contracts.Events;
+using Omro.Contracts.Plans;
 using Omro.Domain.Repositories;
 using Omro.Domain.ResolutionTasks;
 using Omro.Infrastructure.CognitiveServices.Agents;
@@ -80,14 +82,24 @@ public class HybridPolicyOrchestrationTests
 
         var sentBody = dispatched.Single().Body;
         using var sentDoc = JsonDocument.Parse(sentBody);
+        sentDoc.RootElement.GetProperty("schemaVersion").GetString().Should().Be(PlanContractVersions.V2Structured);
         sentDoc.RootElement.GetProperty("resourceId").GetString().Should().Be(resourceId.ToString());
-        var aiPlanJson = sentDoc.RootElement.GetProperty("aiPlanJson").GetString()!;
-        using var aiPlanDoc = JsonDocument.Parse(aiPlanJson);
-        aiPlanDoc.RootElement.GetProperty("Title").GetString().Should().Be("Propuesta HITL enriquecida");
-        aiPlanDoc.RootElement.GetProperty("IsShadowModeFallback").GetBoolean().Should().BeTrue();
-        aiPlanDoc.RootElement.GetProperty("ProposalExpiresAt").GetDateTimeOffset()
+        sentDoc.RootElement.GetProperty("proposalExpiresAt").GetDateTimeOffset()
             .Should().BeAfter(DateTimeOffset.UtcNow.AddMinutes(170));
-        aiPlanDoc.RootElement.GetProperty("DeferredActions").GetArrayLength().Should().Be(1);
+        sentDoc.RootElement.TryGetProperty("aiPlanJson", out _).Should().BeFalse();
+
+        var aiPlanEl = sentDoc.RootElement.GetProperty("aiPlan");
+        aiPlanEl.ValueKind.Should().Be(JsonValueKind.Object);
+        aiPlanEl.GetProperty("schemaVersion").GetString().Should().Be(PlanContractVersions.V2Structured);
+        aiPlanEl.GetProperty("title").GetString().Should().Be("Propuesta HITL enriquecida");
+        aiPlanEl.GetProperty("omroTaskId").GetGuid().Should().Be(task.Id);
+        aiPlanEl.GetProperty("isShadowModeFallback").GetBoolean().Should().BeTrue();
+        aiPlanEl.GetProperty("proposalExpiresAt").GetDateTimeOffset()
+            .Should().BeAfter(DateTimeOffset.UtcNow.AddMinutes(170));
+        aiPlanEl.GetProperty("deferredActions").GetArrayLength().Should().Be(1);
+
+        task.ProposalExpiresAt.Should().NotBeNull();
+        task.ProposalExpiresAt!.Value.Should().BeAfter(DateTimeOffset.UtcNow.AddMinutes(170));
 
         using var scope = ctx.Provider.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
@@ -273,6 +285,82 @@ public class HybridPolicyOrchestrationTests
         webhookHits.Should().Be(0);
     }
 
+    [Fact]
+    public async Task ConfirmationDeadlineMissed_HitlV2EndToEndRoundTrip_ShouldResolveTaskWhenStructuredResolutionApproved()
+    {
+        var dispatched = new ConcurrentBag<(string Path, string Body)>();
+        var httpHandler = new DelegateHttpMessageHandler(async (req, ct) =>
+        {
+            var body = await req.Content!.ReadAsStringAsync(ct);
+            dispatched.Add((req.RequestUri!.AbsolutePath, body));
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        });
+
+        var llm = new StubOrchestrator((_, _) => new CognitivePlan(
+            Title: "HITL v2 E2E",
+            Reasoning: "Riesgo moderado tras aviso final entregado.",
+            ConfidenceScore: 0.78m,
+            ProposedActions: [],
+            IsFallback: false,
+            ExpectsExternalApproval: true));
+
+        await using var ctx = await HybridTestHost.CreateAsync(httpHandler, llm);
+        await ctx.SeedMedCareAsync(autonomousExecutionEnabled: false);
+
+        var resourceId = Guid.NewGuid();
+        await ctx.Harness.Bus.Publish(new AnomalyDetected(
+            TenantId: MedCareTenantId,
+            CorrelationId: Guid.NewGuid(),
+            AnomalyType: "ConfirmationDeadlineMissed",
+            ResourceId: resourceId,
+            RiskProbability: 0.72m,
+            Attributes: new Dictionary<string, string>
+            {
+                ["effective_score"] = "0.72",
+                ["final_notice_status"] = "Delivered"
+            }));
+
+        var waitingTask = await ctx.WaitForTaskAsync(t =>
+            t.Anomaly.ResourceId == resourceId && t.Status == ResolutionStatus.WaitingForExternalData);
+        waitingTask.Should().NotBeNull();
+        waitingTask!.ProposalExpiresAt.Should().NotBeNull();
+
+        var proposeBody = dispatched.Should().ContainSingle(d => d.Path == "/api/resolutions/propose").Subject.Body;
+        using var proposeDoc = JsonDocument.Parse(proposeBody);
+        var structuredPlan = JsonSerializer.Deserialize<StructuredAiPlan>(
+            proposeDoc.RootElement.GetProperty("aiPlan").GetRawText(),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        structuredPlan.Should().NotBeNull();
+        structuredPlan!.SchemaVersion.Should().Be(PlanContractVersions.V2Structured);
+        structuredPlan.OmroTaskId.Should().Be(waitingTask.Id);
+        structuredPlan.DeferredActions.Should().ContainSingle(a => a.ActionType == "GENERATE_OVERBOOK");
+
+        var externalTenantTaskId = Guid.NewGuid();
+        await ctx.Harness.Bus.Publish(new ResolutionApproved(
+            TenantId: MedCareTenantId,
+            CorrelationId: Guid.NewGuid(),
+            ResolutionTaskId: externalTenantTaskId,
+            ResourceId: resourceId,
+            AiPlanJson: null,
+            SchemaVersion: PlanContractVersions.V2Structured,
+            AiPlan: structuredPlan));
+
+        var resolvedTask = await ctx.WaitForTaskAsync(t =>
+            t.Id == waitingTask.Id && t.Status == ResolutionStatus.Resolved);
+
+        resolvedTask.Should().NotBeNull();
+        resolvedTask!.ActionExecutions.Should().HaveCount(2);
+        resolvedTask.ActionExecutions.Should().OnlyContain(e => e.Status == ActionExecutionStatus.Succeeded);
+        resolvedTask.ActionExecutions.Should().Contain(e =>
+            e.Phase == ActionExecutionPhase.Deferred && e.ActionType == "GENERATE_OVERBOOK");
+
+        var overbookBody = dispatched.Should().ContainSingle(d => d.Path == "/api/appointments/overbook").Subject.Body;
+        using var overbookDoc = JsonDocument.Parse(overbookBody);
+        overbookDoc.RootElement.GetProperty("resourceId").GetString().Should().Be(resourceId.ToString());
+        overbookDoc.RootElement.GetProperty("decisionMode").GetString().Should().Be("Approved");
+    }
+
     private sealed class StubOrchestrator : ICognitiveOrchestrator
     {
         private readonly Func<AnomalyEvent, string, CognitivePlan> _fn;
@@ -332,6 +420,7 @@ public class HybridPolicyOrchestrationTests
             services.AddSingleton<IPolicyEngine, JsonDecisionTablePolicyEngine>();
             services.AddSingleton<IDeterministicPlanBuilder, DeterministicPlanBuilder>();
             services.AddSingleton<IPlanValidator, CatalogPlanValidator>();
+            services.AddSingleton<IAiPlanContractParser, AiPlanContractParser>();
             services.AddSingleton(orchestrator);
 
             services.AddResilientWebhookHttpClient(
